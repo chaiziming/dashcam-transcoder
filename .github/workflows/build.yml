@@ -16,6 +16,12 @@ jobs:
     # 必须是 Windows —— 我们打包的是 .exe 和 Windows 安装程序
     runs-on: windows-latest
 
+    # 必须显式声明写权限。GitHub 默认的 GITHUB_TOKEN 是只读的，
+    # 不声明这行的话最后「发布到 Releases」会报
+    # "Resource not accessible by integration"（前 9 步全过就挂这一步）。
+    permissions:
+      contents: write
+
     steps:
       # ---------- 1. 取出代码 ----------
       - name: 检出代码
@@ -293,11 +299,32 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist_installer/*.exe
-          generate_release_notes: true
+          # 不用 generate_release_notes：那个 API 在新仓库/低权限场景下
+          # 会报 "Resource not accessible by integration"。自己写说明更可控。
+          name: 记录仪视频转码工具 ${{ github.ref_name }}
           body: |
             ## 下载
 
             **Windows 用户**：下载下面的 `dashcam-transcoder-*-setup.exe`，双击安装即可。
-            安装包已内置 ffmpeg，无需另行安装。
 
-            **体积说明**：安装包约 125 MB，其中 ffmpeg 占 208 MB（压缩后大幅缩小）。
+            - 向导式安装界面，可自选安装目录
+            - 自动创建开始菜单和桌面快捷方式
+            - **内置 ffmpeg，无需另行安装**
+            - 可从「控制面板 → 应用和功能」正常卸载
+
+            **体积说明**：约 100 MB（已内置 essentials 版 ffmpeg）。
+
+            ## 使用
+
+            1. 双击安装
+            2. 把行车记录仪的 `.h264` 文件拖进窗口
+            3. 等待生成预览，播放到要遮挡的位置后在画面上**拖动鼠标框选**
+            4. 点「开始处理」
+
+            ## 安全提醒
+
+            自动遮挡只挡住你自己车的 VIN。画面里**其他车辆的车牌**是可识别信息，
+            提交举报材料前请务必自行框选遮挡。
+
+            ---
+            由 GitHub Actions 自动构建发布。
