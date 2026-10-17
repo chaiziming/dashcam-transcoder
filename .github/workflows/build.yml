@@ -19,7 +19,7 @@ jobs:
     steps:
       # ---------- 1. 取出代码 ----------
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ---------- 2. 装 Python 依赖 ----------
       - name: 安装 Python 依赖
@@ -28,21 +28,44 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller tkinterdnd2 pytest
 
-      # ---------- 3. 装 Inno Setup（编译安装包用） ----------
-      # Chocolatey 自带在 windows runner 上，无需另装
+      # ---------- 3. 装 Inno Setup（编译安装包用）----------
+      # 不用 choco：首次运行要先下载软件源，受网络/代理/权限影响，
+      # 而且装完 ISCC 的实际路径随版本变化，容易在这一步就挂掉（实测踩过）。
+      # 改成直接下官方安装器静默安装，路径固定可控。
       - name: 安装 Inno Setup
         shell: pwsh
         run: |
-          choco install innosetup --no-progress -y
-          # Chocolatey 装完后当前会话的 PATH 未必刷新，这里直接用完整路径调用。
-          # 注意 ${env:ProgramFiles(x86)} 是 PowerShell 的正确写法，
-          # 不能写成 $env:ProgramFiles"\(x86)\..." 那种拼接（会拼出错误路径）。
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          Write-Host "ISCC: $iscc"
-          if (-not (Test-Path $iscc)) {
-            Write-Error "Inno Setup 安装失败，未找到 $iscc"
+          $installer = Join-Path $env:RUNNER_TEMP "innosetup.exe"
+          $url = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
+          Write-Host "下载 Inno Setup 6.7.3..."
+          Invoke-WebRequest -Uri $url -OutFile $installer
+
+          Write-Host "静默安装..."
+          $p = Start-Process -FilePath $installer `
+                 -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-" `
+                 -Wait -PassThru
+          Write-Host "安装器退出码: $($p.ExitCode)"
+
+          # 官方安装器默认装到 Program Files (x86)，但为防路径变化多试几个
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            Write-Host "预定路径都没找到，全盘搜索一次..."
+            $found = Get-ChildItem -Path "C:\" -Filter "ISCC.exe" -Recurse -ErrorAction SilentlyContinue |
+                     Select-Object -First 1
+            if ($found) { $iscc = $found.FullName }
+          }
+          if (-not $iscc) {
+            Write-Error "找不到 ISCC.exe。已尝试: $($candidates -join ', ')"
             exit 1
           }
+
+          # 传给后续步骤使用
+          "ISCC_PATH=$iscc" >> $env:GITHUB_ENV
+          Write-Host "ISCC 就绪: $iscc"
           & $iscc /? | Select-Object -First 3
 
       # ---------- 4. 下载 ffmpeg ----------
@@ -79,7 +102,9 @@ jobs:
       # ---------- 5. 生成图标 ----------
       - name: 生成应用图标
         shell: pwsh
-        run: python installer\make_icon.py
+        run: |
+          python installer\make_icon.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "图标生成失败"; exit 1 }
 
       # ---------- 6. 跑测试 ----------
       # 没有真实视频样本时，相关用例会自行跳过（见 tests/sample_helper.py）
@@ -88,14 +113,18 @@ jobs:
         run: |
           $env:PYTHONIOENCODING = "utf-8"
           python -m tests.test_core
+          if ($LASTEXITCODE -ne 0) { Write-Error "test_core 失败"; exit 1 }
           python -m tests.test_gui_smoke
+          if ($LASTEXITCODE -ne 0) { Write-Error "test_gui_smoke 失败"; exit 1 }
           python -m tests.test_idle_state
+          if ($LASTEXITCODE -ne 0) { Write-Error "test_idle_state 失败"; exit 1 }
 
       # ---------- 7. 打包 exe ----------
       - name: 打包 exe
         shell: pwsh
         run: |
           python -m PyInstaller build_exe.spec --clean --noconfirm
+          if ($LASTEXITCODE -ne 0) { Write-Error "PyInstaller 打包失败"; exit 1 }
           New-Item -ItemType Directory -Force -Path "build_assets" | Out-Null
           Copy-Item "dist\记录仪视频转码工具.exe" "build_assets\" -Force
           Get-ChildItem build_assets
@@ -109,8 +138,10 @@ jobs:
           $out    = Join-Path $env:GITHUB_WORKSPACE "dist_installer"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
           $readme = (Resolve-Path "docs_使用说明.md").Path
+          $iscc   = $env:ISCC_PATH
+          if (-not (Test-Path $iscc)) { Write-Error "ISCC_PATH 无效: $iscc"; exit 1 }
 
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+          & $iscc `
             "/DBuildAssets=$assets" `
             "/DOutputDir=$out" `
             "/DReadmeFile=$readme" `
