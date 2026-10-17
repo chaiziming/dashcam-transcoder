@@ -45,7 +45,17 @@ DisableProgramGroupPage=yes
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir={#OutputDir}
 OutputBaseFilename=dashcam-transcoder-{#AppVersion}-setup
-SetupIconFile={#BuildAssets}\app.ico
+; 图标是可选的：CI 上图标生成若失败，不该让整个安装包构建挂掉。
+; 用 #ifndef 让调用方（CI / 本地）用 /DSetupIcon 传入图标路径；
+; 不传且文件不存在时，退回 Inno Setup 默认图标。
+#ifndef SetupIcon
+  #define SetupIcon "{#BuildAssets}\app.ico"
+#endif
+#if FileExists(SetupIcon)
+  SetupIconFile={#SetupIcon}
+#else
+  ; 跳过 SetupIconFile，Inno Setup 会用默认图标
+#endif
 UninstallDisplayIcon={app}\{#AppExeName}
 Compression=lzma2/max
 SolidCompression=yes

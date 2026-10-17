@@ -160,8 +160,33 @@ jobs:
       - name: 生成应用图标
         shell: pwsh
         run: |
-          python installer\make_icon.py
-          if ($LASTEXITCODE -ne 0) { Write-Error "图标生成失败"; exit 1 }
+          # 图标是锦上添花，失败不该让整个流水线挂掉 —— 退回无图标版本。
+          - name: 生成应用图标
+            shell: pwsh
+            run: |
+              # 让 Python 输出与仓库里的中文注释一致，避免编码问题
+              $env:PYTHONIOENCODING = "utf-8"
+              New-Item -ItemType Directory -Force -Path "build_assets" | Out-Null
+
+              Write-Host "Python: $(python --version 2>&1)"
+              python installer\make_icon.py 2>&1 | ForEach-Object { Write-Host $_ }
+              $code = $LASTEXITCODE
+              Write-Host "make_icon 退出码 = $code"
+
+              $ico = "build_assets\app.ico"
+              if ($code -eq 0 -and (Test-Path $ico)) {
+                Write-Host "图标就绪: $((Get-Item $ico).Length) 字节"
+              } else {
+                # 打印真实错误，并把整个 build_assets 列出来帮助定位
+                Write-Warning "图标生成失败（退出码 $code），将以无图标方式继续构建"
+                Write-Warning "当前 build_assets 内容："
+                if (Test-Path "build_assets") {
+                  Get-ChildItem "build_assets" -Recurse | ForEach-Object { Write-Warning "  $($_.FullName)" }
+                } else {
+                  Write-Warning "  (目录不存在)"
+                }
+                Remove-Item $ico -ErrorAction SilentlyContinue
+              }
 
       # ---------- 6. 跑测试 ----------
       # 没有真实视频样本时，相关用例会自行跳过（见 tests/sample_helper.py）
