@@ -159,17 +159,26 @@ jobs:
           # 关键：把下载的 ffmpeg 加进 PATH。
           # 后续步骤（跑测试、打包、编译）调 ffmpeg 时靠 PATH 查找，
           # GitHub runner 上本来没有系统 ffmpeg，不加这一步测试会因找不到而失败。
+          #
+          # 两件事都要做，缺一不可：
+          #   1) 改 $env:PATH      → 只对当前步骤生效（下面的验证要用）
+          #   2) 写 $env:GITHUB_PATH → 对后续所有步骤生效
+          # 只写 GITHUB_PATH 的话，当前步骤的 PATH 不会变，
+          # 下面的 Get-Command 会误判为「找不到」而直接失败。
           $ffDir = (Resolve-Path ".\build_assets\ffmpeg").Path
+          $env:PATH = "$ffDir;$env:PATH"
           Add-Content -Path $env:GITHUB_PATH -Value $ffDir
-          Write-Host "已加入 PATH: $ffDir"
+          Write-Host "已加入 PATH（当前步骤 + 后续步骤）: $ffDir"
 
-          # 立刻验证 PATH 生效
-          $which = (Get-Command ffmpeg -ErrorAction SilentlyContinue)
-          if (-not $which) {
-            Write-Error "ffmpeg 加入 PATH 后仍找不到"
+          # 验证：直接用完整路径调，不依赖 PATH（最可靠）
+          $probe = & "$ffDir\ffmpeg.exe" -version 2>&1
+          $probeCode = $LASTEXITCODE
+          Write-Host ($probe | Select-Object -First 1)
+          if ($probeCode -ne 0) {
+            Write-Error "ffmpeg 无法执行 (exit=$probeCode)"
             exit 1
           }
-          Write-Host "PATH 中的 ffmpeg: $($which.Source)"
+          Write-Host "验证通过"
 
       # ---------- 5. 生成图标 ----------
       # 图标是锦上添花，失败不该让整个流水线挂掉 —— 退回无图标版本。
