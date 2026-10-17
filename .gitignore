@@ -56,3 +56,11 @@ Thumbs.db
 tmp/
 temp/
 *.log
+
+# 我自己踩过的坑：临时文件被误提交进仓库。
+# 写提交信息请用 `git commit -m "..."`，
+# 若必须用文件，把文件放在项目目录外（如 %TEMP%）。
+_commitmsg.txt
+_msg.txt
+_fix_*.py
+*.tmp
