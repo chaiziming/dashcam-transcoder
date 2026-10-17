@@ -66,7 +66,6 @@ jobs:
           # 传给后续步骤使用
           "ISCC_PATH=$iscc" >> $env:GITHUB_ENV
           Write-Host "ISCC 就绪: $iscc"
-          & $iscc /? | Select-Object -First 3
 
       # ---------- 4. 下载 ffmpeg ----------
       # 不能把 200MB+ 的二进制提交进仓库，必须构建时现下。
@@ -130,10 +129,32 @@ jobs:
           Copy-Item "$binDir\ffmpeg.exe"  "build_assets\ffmpeg\" -Force
           Copy-Item "$binDir\ffprobe.exe" "build_assets\ffmpeg\" -Force
 
-          # 确认真能用（版本信息打不出来说明文件损坏或缺 DLL）
-          & ".\build_assets\ffmpeg\ffmpeg.exe" -version | Select-Object -First 1
-          if ($LASTEXITCODE -ne 0) { Write-Error "ffmpeg 无法执行"; exit 1 }
-          & ".\build_assets\ffmpeg\ffprobe.exe" -version | Select-Object -First 1
+          # 校验 ffmpeg 真的能执行。
+          # 注意：绝不能写成 `& xxx -version | Select-Object -First 1` ——
+          # Select-Object -First 会提前掐断管道，PowerShell 认为上游进程被异常
+          # 终止，$LASTEXITCODE 会变成 -1，于是一个完全正常的 ffmpeg 被误判为「无法执行」。
+          # 正确做法：先把输出全部收进变量，再从变量里取首行。
+          $ver = & ".\build_assets\ffmpeg\ffmpeg.exe" -version 2>&1
+          $ffCode = $LASTEXITCODE
+          Write-Host ($ver | Select-Object -First 1)
+          if ($ffCode -ne 0) {
+            Write-Error "ffmpeg 无法执行 (exit=$ffCode)"
+            Write-Host "完整输出:"
+            $ver | Select-Object -First 10 | ForEach-Object { Write-Host "  $_" }
+            exit 1
+          }
+
+          $pver = & ".\build_assets\ffmpeg\ffprobe.exe" -version 2>&1
+          $pfCode = $LASTEXITCODE
+          Write-Host ($pver | Select-Object -First 1)
+          if ($pfCode -ne 0) {
+            Write-Error "ffprobe 无法执行 (exit=$pfCode)"
+            exit 1
+          }
+
+          # 打印构建配置，便于日后核对编译能力（libx264/aac 等）
+          $conf = & ".\build_assets\ffmpeg\ffmpeg.exe" -hide_banner -buildconf 2>&1
+          Write-Host "构建配置: $($conf -join '')"
 
       # ---------- 5. 生成图标 ----------
       - name: 生成应用图标
