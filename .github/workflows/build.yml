@@ -156,6 +156,21 @@ jobs:
           $conf = & ".\build_assets\ffmpeg\ffmpeg.exe" -hide_banner -buildconf 2>&1
           Write-Host "构建配置: $($conf -join '')"
 
+          # 关键：把下载的 ffmpeg 加进 PATH。
+          # 后续步骤（跑测试、打包、编译）调 ffmpeg 时靠 PATH 查找，
+          # GitHub runner 上本来没有系统 ffmpeg，不加这一步测试会因找不到而失败。
+          $ffDir = (Resolve-Path ".\build_assets\ffmpeg").Path
+          Add-Content -Path $env:GITHUB_PATH -Value $ffDir
+          Write-Host "已加入 PATH: $ffDir"
+
+          # 立刻验证 PATH 生效
+          $which = (Get-Command ffmpeg -ErrorAction SilentlyContinue)
+          if (-not $which) {
+            Write-Error "ffmpeg 加入 PATH 后仍找不到"
+            exit 1
+          }
+          Write-Host "PATH 中的 ffmpeg: $($which.Source)"
+
       # ---------- 5. 生成图标 ----------
       # 图标是锦上添花，失败不该让整个流水线挂掉 —— 退回无图标版本。
       - name: 生成应用图标
@@ -191,12 +206,36 @@ jobs:
         shell: pwsh
         run: |
           $env:PYTHONIOENCODING = "utf-8"
-          python -m tests.test_core
-          if ($LASTEXITCODE -ne 0) { Write-Error "test_core 失败"; exit 1 }
-          python -m tests.test_gui_smoke
-          if ($LASTEXITCODE -ne 0) { Write-Error "test_gui_smoke 失败"; exit 1 }
-          python -m tests.test_idle_state
-          if ($LASTEXITCODE -ne 0) { Write-Error "test_idle_state 失败"; exit 1 }
+
+          # 逐个跑并完整打印输出与真实退出码。
+          # 测试是发布前的质量闸门，失败必须中断 —— 但必须让人看得懂为什么挂。
+          $testList = @("tests.test_core", "tests.test_gui_smoke", "tests.test_idle_state")
+          $failed = @()
+
+          foreach ($t in $testList) {
+            Write-Host "=========================================="
+            Write-Host ">>> 运行 $t"
+            Write-Host "=========================================="
+
+            $out = & python -m $t 2>&1
+            $code = $LASTEXITCODE
+            $out | ForEach-Object { Write-Host $_ }
+
+            Write-Host ">>> $t 退出码 = $code"
+            if ($code -ne 0) { $failed += $t }
+            Write-Host ""
+          }
+
+          if ($failed.Count -gt 0) {
+            Write-Error "以下测试失败: $($failed -join ', ')"
+            Write-Host ""
+            Write-Host "排查提示："
+            Write-Host "  - 找不到 ffmpeg：步骤 4 下载的 ffmpeg 在 build_assets\ffmpeg，需加入 PATH"
+            Write-Host "  - tkinter 缺失：CI 的 Python 可能没带 tkinter，GUI 测试会全挂"
+            Write-Host "  - 权限/显示：CI 无桌面会话，GUI 测试需无头模式"
+            exit 1
+          }
+          Write-Host "全部测试通过"
 
       # ---------- 7. 打包 exe ----------
       - name: 打包 exe
