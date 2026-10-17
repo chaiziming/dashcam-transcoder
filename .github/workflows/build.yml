@@ -1,0 +1,145 @@
+name: 构建安装包
+
+# 触发时机：
+#   推 tag（v1.0.0 这样）→ 构建并发布到 Releases
+#   手动触发 / 推 main    → 只构建，不发布（用于验证流水线是否正常）
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    # 必须是 Windows —— 我们打包的是 .exe 和 Windows 安装程序
+    runs-on: windows-latest
+
+    steps:
+      # ---------- 1. 取出代码 ----------
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # ---------- 2. 装 Python 依赖 ----------
+      - name: 安装 Python 依赖
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller tkinterdnd2 pytest
+
+      # ---------- 3. 装 Inno Setup（编译安装包用） ----------
+      # Chocolatey 自带在 windows runner 上，无需另装
+      - name: 安装 Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          # Chocolatey 装完后当前会话的 PATH 未必刷新，这里直接用完整路径调用。
+          # 注意 ${env:ProgramFiles(x86)} 是 PowerShell 的正确写法，
+          # 不能写成 $env:ProgramFiles"\(x86)\..." 那种拼接（会拼出错误路径）。
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          Write-Host "ISCC: $iscc"
+          if (-not (Test-Path $iscc)) {
+            Write-Error "Inno Setup 安装失败，未找到 $iscc"
+            exit 1
+          }
+          & $iscc /? | Select-Object -First 3
+
+      # ---------- 4. 下载 ffmpeg ----------
+      # 不能把 200MB+ 的二进制提交进仓库，必须构建时现下。
+      # 用 BtbN 的构建而不是 gyan.dev：实测 Invoke-WebRequest 请求
+      # gyan 的 latest 重定向会返回 404（curl 能过，PowerShell 不行）。
+      - name: 下载 ffmpeg
+        shell: pwsh
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          Write-Host "下载 ffmpeg（约 200MB，需要一两分钟）..."
+          Invoke-WebRequest -Uri $url -OutFile $zip
+
+          $extractDir = Join-Path $env:RUNNER_TEMP "ffmpeg-extracted"
+          Expand-Archive -Path $zip -DestinationPath $extractDir -Force
+
+          # 解压目录名带版本号，需定位 bin 目录
+          $bin = Get-ChildItem $extractDir -Recurse -Filter "ffmpeg.exe" -File |
+                 Select-Object -First 1
+          if (-not $bin) { Write-Error "压缩包里没有 ffmpeg.exe，解压失败"; exit 1 }
+          $binDir = $bin.Directory.FullName
+          Write-Host "ffmpeg 目录: $binDir"
+
+          New-Item -ItemType Directory -Force -Path "build_assets\ffmpeg" | Out-Null
+          Copy-Item "$binDir\ffmpeg.exe"  "build_assets\ffmpeg\" -Force
+          Copy-Item "$binDir\ffprobe.exe" "build_assets\ffmpeg\" -Force
+
+          # 确认真能用（版本信息打不出来说明文件损坏或缺 DLL）
+          & ".\build_assets\ffmpeg\ffmpeg.exe" -version | Select-Object -First 1
+          if ($LASTEXITCODE -ne 0) { Write-Error "ffmpeg 无法执行"; exit 1 }
+          & ".\build_assets\ffmpeg\ffprobe.exe" -version | Select-Object -First 1
+
+      # ---------- 5. 生成图标 ----------
+      - name: 生成应用图标
+        shell: pwsh
+        run: python installer\make_icon.py
+
+      # ---------- 6. 跑测试 ----------
+      # 没有真实视频样本时，相关用例会自行跳过（见 tests/sample_helper.py）
+      - name: 运行测试
+        shell: pwsh
+        run: |
+          $env:PYTHONIOENCODING = "utf-8"
+          python -m tests.test_core
+          python -m tests.test_gui_smoke
+          python -m tests.test_idle_state
+
+      # ---------- 7. 打包 exe ----------
+      - name: 打包 exe
+        shell: pwsh
+        run: |
+          python -m PyInstaller build_exe.spec --clean --noconfirm
+          New-Item -ItemType Directory -Force -Path "build_assets" | Out-Null
+          Copy-Item "dist\记录仪视频转码工具.exe" "build_assets\" -Force
+          Get-ChildItem build_assets
+
+      # ---------- 8. 编译安装包 ----------
+      - name: 编译安装包
+        shell: pwsh
+        run: |
+          # 用 /D 传绝对路径 —— CI 的工作目录和本地不同
+          $assets = (Resolve-Path "build_assets").Path
+          $out    = Join-Path $env:GITHUB_WORKSPACE "dist_installer"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $readme = (Resolve-Path "docs_使用说明.md").Path
+
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            "/DBuildAssets=$assets" `
+            "/DOutputDir=$out" `
+            "/DReadmeFile=$readme" `
+            "installer\dashcam_transcoder.iss"
+
+          # 注意：Inno 编译失败时 ISCC 的 ExitCode 可能是 2 而不是 1，两种都要当失败
+          if ($LASTEXITCODE -ne 0) { Write-Error "安装包编译失败 (exit=$LASTEXITCODE)"; exit 1 }
+          Get-ChildItem $out
+
+      # ---------- 9. 上传产物 ----------
+      - name: 上传安装包（普通 push 时也存一份，方便下载测试）
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashcam-transcoder-setup
+          path: dist_installer/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      # ---------- 10. 发到 Releases（仅 tag 触发时） ----------
+      - name: 发布到 Releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist_installer/*.exe
+          generate_release_notes: true
+          body: |
+            ## 下载
+
+            **Windows 用户**：下载下面的 `dashcam-transcoder-*-setup.exe`，双击安装即可。
+            安装包已内置 ffmpeg，无需另行安装。
+
+            **体积说明**：安装包约 125 MB，其中 ffmpeg 占 208 MB（压缩后大幅缩小）。

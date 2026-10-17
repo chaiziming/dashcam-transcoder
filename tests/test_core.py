@@ -19,6 +19,16 @@ PASS, FAIL = "\033[92mPASS\033[0m", "\033[91mFAIL\033[0m"
 _results: list[bool] = []
 
 
+SKIP_NOTE = "未找到样本（设 VIN_TEST_VIDEO 或放 sample.h264）"
+_skipped: list[bool] = []
+
+
+def skip(reason: str = "") -> None:
+    """标记为「跳过」而非「失败」——缺前置条件不算测试不通过。"""
+    _skipped.append(True)
+    print(f"  [SKIP] {reason}")
+
+
 def check(name: str, cond: bool, detail: str = "") -> None:
     _results.append(bool(cond))
     print(f"  [{PASS if cond else FAIL}] {name}" + (f"  -> {detail}" if detail else ""))
@@ -109,7 +119,9 @@ def test_probe_real():
         check("ffmpeg 可用", False)
         return
     if src is None:
-        check("测试样本可用", False, "未找到样本（设 VIN_TEST_VIDEO 或放 sample.h264）")
+        # 「没有样本」不是测试失败，而是测试不具备运行条件。
+        # 若记为 FAIL 会让退出码变成 1，CI 上会直接中断流水线。
+        skip(SKIP_NOTE)
         return
     info = ffmpeg_env.probe_video(src, ff)
     check("探测成功", info is not None)
@@ -127,8 +139,11 @@ def test_real_pack():
     ff = ffmpeg_env.find_binary("ffmpeg")
     src = require_sample()
     print("\n== 5. 真实打包（截取 10 秒验证效果） ==")
-    if not ff or src is None:
-        check("测试样本可用", False)
+    if src is None:
+        skip(SKIP_NOTE)
+        return
+    if not ff:
+        check("ffmpeg 可用", False)
         return
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "test_out.mp4"

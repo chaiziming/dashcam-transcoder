@@ -16,7 +16,19 @@
 #define AppPublisher   "czm-curtis"
 #define AppURL         "https://github.com/chaiziming/dashcam-transcoder"
 #define AppExeName     "记录仪视频转码工具.exe"
-#define BuildAssets    "D:\vin-mosaic-app\build_assets"
+
+; 下面三个可用 ISCC 的 /D参数覆盖，供 CI 使用不同路径：
+;   ISCC /DBuildAssets=C:\a\build_assets /DOutputDir=C:\a\out installer\dashcam_transcoder.iss
+; 不传 /D 时用这里的默认值（本地相对路径，脚本须在 installer/ 目录下编译）。
+#ifndef BuildAssets
+  #define BuildAssets "..\build_assets"
+#endif
+#ifndef OutputDir
+  #define OutputDir "..\dist_installer"
+#endif
+#ifndef ReadmeFile
+  #define ReadmeFile "..\docs_使用说明.md"
+#endif
 
 [Setup]
 AppId={{A1B2C3D4-5E6F-4A7B-8C9D-0E1F2A3B4C5D}
@@ -31,7 +43,7 @@ DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 PrivilegesRequiredOverridesAllowed=dialog
-OutputDir=D:\vin-mosaic-app\dist_installer
+OutputDir={#OutputDir}
 OutputBaseFilename=dashcam-transcoder-{#AppVersion}-setup
 SetupIconFile={#BuildAssets}\app.ico
 UninstallDisplayIcon={app}\{#AppExeName}
@@ -55,7 +67,7 @@ Source: "{#BuildAssets}\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildAssets}\ffmpeg\ffmpeg.exe"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion
 Source: "{#BuildAssets}\ffmpeg\ffprobe.exe"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion
 ; 使用说明
-Source: "D:\vin-mosaic-app\docs_使用说明.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
+Source: "{#ReadmeFile}"; DestDir: "{app}"; Flags: ignoreversion isreadme
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
