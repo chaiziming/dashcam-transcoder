@@ -274,15 +274,37 @@ jobs:
           $iscc   = $env:ISCC_PATH
           if (-not (Test-Path $iscc)) { Write-Error "ISCC_PATH 无效: $iscc"; exit 1 }
 
+          # 版本号从 git tag 取（v1.0.8 -> 1.0.8），避免安装包文件名和 tag 对不上。
+          # 不是 tag 触发的构建（推 main / 手动触发）就用 commit 短哈希。
+          $ref = $env:GITHUB_REF
+          $ver = "0.0.0"
+          if ($ref -match '^refs/tags/v(.+)$') {
+            $ver = $Matches[1]
+          } elseif ($env:GITHUB_SHA) {
+            $ver = $env:GITHUB_SHA.Substring(0, 7)
+          }
+          Write-Host "构建版本: $ver （来源: $ref）"
+
           & $iscc `
+            "/DAppVersion=$ver" `
             "/DBuildAssets=$assets" `
             "/DOutputDir=$out" `
             "/DReadmeFile=$readme" `
             "installer\dashcam_transcoder.iss"
 
-          # 注意：Inno 编译失败时 ISCC 的 ExitCode 可能是 2 而不是 1，两种都要当失败
-          if ($LASTEXITCODE -ne 0) { Write-Error "安装包编译失败 (exit=$LASTEXITCODE)"; exit 1 }
-          Get-ChildItem $out
+          # 注意：Inno 编译失败时 ExitCode 可能是 2 而不是 1，非 0 都当失败
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "安装包编译失败 (exit=$LASTEXITCODE)"
+            exit 1
+          }
+          $setup = Get-ChildItem $out -Filter "*.exe"
+          if (-not $setup) { Write-Error "编译成功但没产出安装包"; exit 1 }
+          $setup | Select-Object Name, @{n='MB'; e={[math]::Round($_.Length/1MB,1)}}
+
+          # 文件名版本号必须与构建版本一致，不一致要立刻发现
+          if ($setup.Name -notmatch [regex]::Escape($ver)) {
+            Write-Warning "警告：安装包名 $($setup.Name) 与构建版本 $ver 不一致"
+          }
 
       # ---------- 9. 上传产物 ----------
       - name: 上传安装包（普通 push 时也存一份，方便下载测试）

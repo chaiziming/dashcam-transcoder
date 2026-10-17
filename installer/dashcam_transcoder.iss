@@ -12,7 +12,13 @@
 ;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\dashcam_transcoder.iss
 
 #define AppName        "记录仪视频转码工具"
-#define AppVersion     "1.0.0"
+; AppVersion 可由调用方通过 /DAppVersion 覆盖。
+; CI 会用 git tag（v1.0.8 -> 1.0.8）传入，
+; 否则回退到 app_version.txt（由 CI 生成），最后才是下面的默认值。
+; 不写死是为了避免「tag 是 v1.0.8、安装包却叫 1.0.0」这种错位。
+#ifndef AppVersion
+  #define AppVersion "1.0.0"
+#endif
 #define AppPublisher   "czm-curtis"
 #define AppURL         "https://github.com/chaiziming/dashcam-transcoder"
 #define AppExeName     "记录仪视频转码工具.exe"
