@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# PyInstaller / 安装包构建
+build/
+build*/
+dist/
+dist*/
+build_assets/
+dist_installer/
+*.manifest
+
+# 打包产物与二进制（体积大，不入库）
+release*/
+*.exe
+ffmpeg/
+ffmpeg.exe
+ffprobe.exe
+ffplay.exe
+*.dll
+*.spec.bak
+
+# 测试样本与输出（行车记录仪视频是隐私数据，绝不入库）
+sample.h264
+sample.mp4
+*_mosaic.mp4
+*_mosaic.png
+*.h264
+*.hevc
+
+# 运行时配置（本地生成）
+config.json
+installer/out/
+probe_result.txt
+probe.txt
+
+# 输出文件
+output*.mp4
+src.mp4
+c.mp4
+list.txt
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 临时
+tmp/
+temp/
+*.log
