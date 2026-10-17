@@ -1,13 +1,13 @@
 修复 CI 构建失败：Inno Setup 安装方式
 
-首次 CI 运行在第3步「安装 Inno Setup」失败（exit code 1，43秒就挂了，
+首次 CI 运行在第3步「安装 Inno Setup」失败（exit code 1，43 秒就挂了，
 根本没走到下载 ffmpeg）。
 
 原因：choco install innosetup 首次运行需要先下载软件源，
 受网络/代理/权限影响容易失败，且装完 ISCC 的实际路径随版本变化。
 
 改为直接下载官方安装器静默安装，路径固定可控：
-- 下载 https://github.com/jrsoftware/issrc/releases/.../innosetup-6.7.3.exe
+- 下载官方 innosetup-6.7.3.exe
 - /VERYSILENT 静默安装
 - 按候选路径查找 ISCC.exe，都找不到则全盘搜索兜底
 - 通过 GITHUB_ENV 传给后续步骤
