@@ -229,6 +229,8 @@ jobs:
             "tests.test_gui_smoke",
             "tests.test_idle_state",
             "tests.test_player_bar",
+            "tests.test_merge_ui",
+            "tests.test_merge",
             "tests.check_workflow"
           )
           $failed = @()

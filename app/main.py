@@ -438,6 +438,11 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.btn_choose = ttk.Button(top, text="选择视频文件…", command=self.on_choose)
         self.btn_choose.grid(row=0, column=0, sticky="w")
 
+        # 合并多个分段视频（行车记录仪按时间分段录制，同一起事故常分散在两个文件里）
+        self.btn_merge = ttk.Button(top, text="合并视频…", command=self.on_merge)
+        self.btn_merge.grid(row=0, column=2, sticky="e")
+        self._sync_merge_btn()
+
         # 原来的「换帧预览」按钮已移除：进度条拖拽 + 快进快退已能覆盖同样的需求，
         # 而且它原本直接解码原始裸流，点了会很慢。
         self.lbl_src = ttk.Label(top, text="未选择文件", style="Muted.TLabel",
@@ -656,6 +661,8 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
             "job_done": lambda: self._finish_job(*args),
             "play_frame": lambda: self._on_frame_ready(*args),
             "seek_frame": lambda: self._on_seek_frame_ready(*args),
+            "merge_progress": lambda: self._on_merge_progress(*args),
+            "merge_done": lambda: self._on_merge_done(*args),
         }
         fn = handlers.get(kind)
         if fn:
@@ -731,6 +738,155 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
                        ("h264 裸流", "*.h264"), ("所有文件", "*.*")])
         if path:
             self.load_file(Path(path))
+
+    # ---------- 合并多个分段视频 ----------
+    def _sync_merge_btn(self) -> None:
+        """合并按钮的可用状态取决于 ffmpeg 是否就绪。"""
+        if hasattr(self, "btn_merge"):
+            self.btn_merge.config(
+                state="normal" if self.ffmpeg and self.ffprobe else "disabled")
+
+    def on_merge(self) -> None:
+        """把多个分段视频按顺序拼成一个，并顺带应用当前遮挡设置。
+
+        典型场景：行车记录仪按时间分段录制，同一起事故被切在两个文件里，
+        合并后才能看清完整过程。
+        """
+        if not self.ffmpeg:
+            self._notify("ffmpeg 未就绪")
+            return
+
+        start_dir = self.cfg.get("last_dir") or str(Path.home())
+        paths = filedialog.askopenfilenames(
+            title="按时间顺序选择要合并的视频（可多选）",
+            initialdir=start_dir,
+            filetypes=[("视频文件", " ".join(f"*{e}" for e in VIDEO_EXTS)),
+                       ("h264 裸流", "*.h264"), ("所有文件", "*.*")])
+        if not paths:
+            return
+
+        files = [Path(p) for p in paths]
+        if len(files) < 2:
+            self._notify("至少选择 2 个视频才能合并")
+            return
+
+        # 裸流没有可读的时长，只能靠文件体积估算总量
+        total_mb = sum(f.stat().st_size for f in files) / 1024 / 1024
+        if not messagebox.askyesno(
+                "确认合并",
+                f"将按所选顺序合并 {len(files)} 个视频：\n\n"
+                + "\n".join(f"  {i+1}. {f.name}" for i, f in enumerate(files))
+                + f"\n\n合并后约 {total_mb:.0f} MB"
+                  "\n（输出为 MP4，已内置当前遮挡设置）\n\n是否继续？"):
+            return
+
+        default_name = f"{files[0].stem}_合并.mp4"
+        out = filedialog.asksaveasfilename(
+            title="保存合并结果",
+            initialdir=str(files[0].parent),
+            initialfile=default_name,
+            defaultextension=".mp4",
+            filetypes=[("MP4 视频", "*.mp4")])
+        if not out:
+            return
+
+        # 复用当前界面的遮挡设置（与「开始处理」用同一份构造逻辑）
+        src_info = self.info
+        width = src_info.width if src_info else 1920
+        height = src_info.height if src_info else 1080
+        plan = MaskPlan(
+            width=width, height=height,
+            use_vin_preset=bool(self.var_vin.get()),
+            vin_box=self.vin_box_real,
+            extra=[MaskRegion(**r.to_dict()) for r in self.canvas_box.regions],
+            effect=self._current_effect(),
+            intensity=int(self.var_strength.get() or 0),
+        )
+        crf = int(self.var_crf.get())
+        fps = src_info.fps if src_info and src_info.fps > 0 else 25.0
+
+        try:
+            cmd = packager.build_merge_command(
+                self.ffmpeg, files, out, plan,
+                crf=crf, preset="slow", fps=fps)
+        except ValueError as e:
+            self._notify(f"合并参数有误：{e}")
+            return
+
+        self._set_busy(True, f"正在合并 {len(files)} 个视频…")
+        try:
+            self._run_merge_job(cmd, out)
+        finally:
+            self._set_busy(False)
+
+    def _run_merge_job(self, cmd: list[str], out: str) -> None:
+        """在后台线程跑合并，完成后回主线程提示。"""
+        def work() -> None:
+            def on_progress(p: packager.Progress) -> None:
+                self._post("merge_progress", p)
+            def on_log(line: str) -> None:
+                if any(k in line for k in ("Error", "error", "Invalid")):
+                    self._post("job_log", line.strip())
+
+            total = self._estimate_merge_seconds_for(cmd)
+            res = packager.run_merge_job(
+                cmd, out, total_duration=total,
+                on_progress=on_progress, on_log=on_log,
+                cancel_event=self.cancel_event)
+            self._post("merge_done", res, out)
+
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+
+    def _estimate_merge_seconds_for(self, cmd: list[str]) -> float | None:
+        """从已生成的命令里取出输入列表，估算总时长。"""
+        files = []
+        for i, a in enumerate(cmd):
+            if a == "-i" and i + 1 < len(cmd):
+                files.append(Path(cmd[i + 1]))
+        return self._estimate_merge_seconds(files) if files else None
+
+    def _estimate_merge_seconds(self, files: list[Path]) -> float | None:
+        """估算合并后的总时长，用来算进度百分比。
+
+        裸流 .h264 的 ffprobe 拿不到 duration（裸流没有容器头），
+        需要退回数帧反推；任何一段算不出来就返回 None，
+        让进度条改用「不确定时长」模式而不是显示错误百分比。
+        """
+        total = 0.0
+        for f in files:
+            info = ffmpeg_env.probe_video(f, self.ffprobe)
+            if info is None:
+                return None
+            if info.duration is None:
+                info.duration = ffmpeg_env.probe_duration_by_counting(
+                    self.ffprobe, f, info.fps)
+            if info.duration is None:
+                return None
+            total += info.duration
+        return total or None
+
+    def _on_merge_progress(self, p: "packager.Progress") -> None:
+        if p.pct is not None:
+            self.progress.set_progress(p.pct)
+            self._show_prog(f"{p.pct:.0f}%  {hhmmss(p.seconds)}")
+        else:
+            self.progress.set_indeterminate(True)
+            self._show_prog(f"已处理 {hhmmss(p.seconds)}  {p.stage}")
+
+    def _on_merge_done(self, res: "packager.JobResult", out: str) -> None:
+        self.progress.reset()
+        self._set_busy(False)
+        if not res.ok:
+            self._notify(f"合并失败：{res.message}")
+            messagebox.showerror("合并失败",
+                                 f"{res.message}\n\n{res.stderr_tail[-400:]}")
+            return
+        self._notify(f"合并完成：{Path(out).name}")
+        messagebox.showinfo(
+            "合并完成",
+            f"已按所选顺序合并为一个连续视频，并应用了当前遮挡设置。\n\n"
+            f"保存位置：\n{out}")
 
     def on_clear_regions(self) -> None:
         """清空全部自定义遮挡框（不影响自动 VIN 遮挡）。"""
