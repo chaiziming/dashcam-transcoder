@@ -44,12 +44,27 @@
 
 **改完代码想马上试？不用等 GitHub Actions 跑完再下载。**
 
+**最简单：双击 `build.bat`。** 它会自动找一个能用的 Python（含项目自带的 `.venv`），
+缺什么依赖自动装。
+
+首次使用建议用 [uv](https://docs.astral.sh/uv/) 建环境 —— 它把 Python
+装在项目内 `.venv/`，**完全不碰系统 PATH**：
+
 ```bash
-python build_local.py                     # 完整构建，约 2 分钟
-python build_local.py --skip-exe          # 只改界面时代：复用已有 exe，约 100 秒
-python build_local.py --version 1.2.3     # 指定版本号
-python build_local.py --skip-inno         # 没装 Inno Setup 时，只出免安装版
-python build_local.py --clean             # 先清干净再构建
+winget install --id astral-sh.uv   # 装 uv（只装一次）
+uv sync                            # 建 .venv 并装依赖，约 1 分钟
+```
+
+之后日常命令：
+
+```bash
+python build_local.py             # 完整构建，约 2 分钟
+python build_local.py --skip-exe  # 只改界面时代：复用已有 exe，约 100 秒
+python build_local.py --version 1.2.3
+python build_local.py --skip-inno  # 没装 Inno Setup 时只出免安装版
+python build_local.py --clean      # 先清干净再构建
+
+uv run python build_local.py       # 或者直接用 uv 跑（会自动准备环境）
 ```
 
 产物在 `dist_installer/`：
@@ -59,16 +74,6 @@ python build_local.py --clean             # 先清干净再构建
 
 脚本会**自动复用本机已装的 ffmpeg**（`C:\Program Files\ffmpeg\bin` 等），
 不用每次下载 100MB+。版本号默认取最近的 git tag，也可以用 `--version` 指定。
-
-前置条件：
-
-```bash
-pip install pyinstaller tkinterdnd2
-```
-
-编译安装包还需要 [Inno Setup](https://jrsoftware.org/isdl.php)（默认装在
-`C:\Program Files (x86)\Inno Setup 6`）。没装的话用 `--skip-inno`，
-仍然能拿到免安装版测试。
 
 ### 从源码运行
 

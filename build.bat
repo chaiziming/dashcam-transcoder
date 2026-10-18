@@ -3,8 +3,12 @@ REM ============================================================
 REM  一键本地构建  ——  双击本文件即可
 REM  产物在 dist_installer\
 REM
-REM  注意：脚本会自动检查 Python 是否可用、缺什么依赖自动装。
-REM  如果窗口一闪而过，请不要关闭，改用 PowerShell 运行本文件查看错误。
+REM  Python 来源优先级：
+REM    1. 项目自带的 .venv\Scripts\python.exe   （推荐，uv 管理）
+REM    2. py 启动器
+REM    3. PATH 里的 python（自动跳过 Windows 占位符）
+REM    4. 常见安装位置
+REM  都没有时会提示用 uv 一键创建环境。
 REM ============================================================
 chcp 65001 >nul 2>&1
 cd /d "%~dp0"
@@ -16,41 +20,55 @@ echo   一键本地构建
 echo ==========================================================
 echo.
 
-REM ---------- 1. 找一个真正能用的 Python ----------
-REM Windows 的 PATH 里通常有个 0 字节的 Microsoft\WindowsApps\python.exe，
-REM 它执行脚本会直接返回 9009 且没有任何输出。这里必须绕开它。
-
 set "PY="
+set "UV_CMD="
 
-REM 1) 先试 py 启动器（python.org 官方安装包会装）
-where py >nul 2>&1
-if not errorlevel 1 (
-    py -3 -c "import sys" >nul 2>&1
+REM ---------- 1. 优先用项目自带的 .venv ----------
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" -c "print(1)" >nul 2>&1
     if not errorlevel 1 (
-        set "PY=py -3"
+        set "PY=.venv\Scripts\python.exe"
         goto :found
     )
 )
 
-REM 2) 扫 PATH 里的 python，跳过 WindowsApps 占位
-for /f "delims=" %%p in ('where python 2^>nul') do (
-    if not defined PY (
-        echo %%p | find /i "WindowsApps" >nul
-        if errorlevel 1 (
-            %%p -c "print(1)" >nul 2>&1
-            if not errorlevel 1 set "PY=%%p"
+REM ---------- 2. uv（如果没有 .venv 但装了 uv，就用 uv 跑） ----------
+where uv >nul 2>&1
+if not errorlevel 1 set "UV_CMD=uv"
+
+REM ---------- 3. py 启动器 ----------
+if not defined PY (
+    where py >nul 2>&1
+    if not errorlevel 1 (
+        py -3 -c "import sys" >nul 2>&1
+        if not errorlevel 1 (
+            set "PY=py -3"
+            goto :found
         )
     )
 )
 
-REM 3) 扫常见安装位置 + 开发工具自带运行时
+REM ---------- 4. 扫 PATH，跳过 WindowsApps 占位符 ----------
+if not defined PY (
+    for /f "delims=" %%p in ('where python 2^>nul') do (
+        if not defined PY (
+            echo %%p | find /i "WindowsApps" >nul
+            if errorlevel 1 (
+                %%p -c "print(1)" >nul 2>&1
+                if not errorlevel 1 set "PY=%%p"
+            )
+        )
+    )
+)
+
+REM ---------- 5. 常见安装位置 ----------
 if not defined PY (
     for %%d in (
+        "%LOCALAPPDATA%\Programs\Python\Python314\python.exe"
         "%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
         "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
         "%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
-        "C:\Program Files\Python313\python.exe"
-        "C:\Program Files\Python312\python.exe"
+        "C:\Python314\python.exe"
         "C:\Python313\python.exe"
         "C:\Python312\python.exe"
     ) do (
@@ -63,7 +81,7 @@ if not defined PY (
     )
 )
 
-REM 4) 开发工具自带的 Python（如 WorkBuddy / VSCode 附带）
+REM ---------- 6. 开发工具自带的 Python ----------
 if not defined PY (
     for /d %%v in ("%USERPROFILE%\.workbuddy\binaries\python\versions\*") do (
         if not defined PY (
@@ -79,13 +97,19 @@ if not defined PY (
 if not defined PY (
     echo [错误] 没找到可用的 Python
     echo.
-    echo   Windows 自带的 Microsoft\WindowsApps\python.exe 是 0 字节占位程序，
+    echo   Windows 自带的 Microsoft\WindowsApps\python.exe 是 0 字节占位文件，
     echo   执行任何脚本都不会真正运行。
     echo.
-    echo   请安装真正的 Python：
-    echo     https://www.python.org/downloads/
+    echo   推荐用 uv（不污染系统，可完全管理 Python 版本）：
     echo.
-    echo   安装时务必勾选 "Add python.exe to PATH"，然后重新双击本文件。
+    echo     winget install --id astral-sh.uv
+    echo     uv sync
+    echo.
+    echo   装完 uv 后重新双击本文件即可。
+    echo.
+    echo   或者安装正式版 Python：
+    echo     https://www.python.org/downloads/
+    echo     （安装时务必勾选 Add python.exe to PATH）
     echo.
     pause
     exit /b 1
@@ -95,7 +119,7 @@ echo [1/3] 使用 Python: %PY%
 %PY% --version 2>&1
 echo.
 
-REM ---------- 2. 装依赖（缺什么装什么）----------
+REM ---------- 依赖检查 ----------
 echo [2/3] 检查依赖...
 
 %PY% -c "import PyInstaller" >nul 2>&1
@@ -123,7 +147,7 @@ if errorlevel 1 (
 echo       依赖齐全
 echo.
 
-REM ---------- 3. 构建 ----------
+REM ---------- 构建 ----------
 echo [3/3] 开始构建（首次约 2 分钟，请勿关闭窗口）...
 echo.
 
@@ -134,10 +158,9 @@ echo.
 if not "%RC%"=="0" (
     echo ==========================================================
     echo   [构建失败] 退出码 %RC%
-    echo   详细错误见上方输出
     echo ==========================================================
     echo.
-    echo 如果上面提示缺少 ffmpeg，可以改用只出免安装版的方式：
+    echo 如果提示缺 ffmpeg，可只出免安装版：
     echo   %PY% build_local.py --skip-inno
     echo.
     pause

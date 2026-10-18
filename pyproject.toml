@@ -1,0 +1,25 @@
+[project]
+name = "dashcam-transcoder"
+version = "1.0.0"
+description = "行车记录仪视频转码与隐私遮挡工具"
+requires-python = ">=3.11"
+dependencies = [
+    "tkinterdnd2>=0.4.2",
+]
+
+[project.optional-dependencies]
+# 开发/构建依赖：只有打包时才需要
+build = [
+    "pyinstaller>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pyinstaller>=6.0",
+    "tkinterdnd2>=0.4.2",
+]
+
+[tool.uv]
+# uv 会把 Python 装在项目内的 .venv，不污染系统
+package = false

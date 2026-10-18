@@ -175,6 +175,11 @@ def resolve_python() -> str | None:
         except (OSError, subprocess.SubprocessError):
             return False
 
+    # 0) 项目自带的 .venv（推荐，uv 管理，完全独立于系统）
+    venv = ROOT / ".venv" / "Scripts" / "python.exe"
+    if venv.is_file() and usable(str(venv)):
+        return f'"{venv}"'
+
     # 1) py 启动器（官方安装包会装这个）
     launcher = shutil.which("py")
     if launcher:
@@ -209,6 +214,46 @@ def resolve_python() -> str | None:
             if c.is_file() and usable(str(c)):
                 return f'"{c}"'
     return None
+
+
+def find_uv() -> str | None:
+    """找 uv 可执行文件（用于 uv sync / uv run）。"""
+    p = shutil.which("uv")
+    if p and Path(p).stat().st_size > 1024:
+        return p
+    # winget 装的话在 Packages 目录下，且 Links 里是 0 字节占位符
+    root = Path.home() / "AppData/Local/Microsoft/WinGet/Packages"
+    if root.is_dir():
+        for pkg in root.glob("astral-sh.uv*"):
+            for exe in pkg.glob("uv.exe"):
+                if exe.stat().st_size > 1024:
+                    return str(exe)
+    return None
+
+
+def ensure_env() -> None:
+    """没有可用 Python 时，用 uv 现场创建一个（不污染系统）。"""
+    uv = find_uv()
+    hint_install = (
+        "没找到可用的 Python。\n\n"
+        "推荐用 uv 管理（不往系统 PATH 塞任何东西）：\n"
+        "    winget install --id astral-sh.uv\n"
+        "    uv sync\n\n"
+        "或者安装正式版 Python：\n"
+        "    https://www.python.org/downloads/\n"
+        "    （安装时勾选 Add python.exe to PATH）")
+    if not uv:
+        raise SystemExit(hint_install)
+
+    print(f"[!] 没找到可用的 Python，尝试用 uv 自动创建环境…")
+    print(f"    uv: {uv}")
+    r = subprocess.run([uv, "sync"], cwd=ROOT)
+    if r.returncode != 0:
+        raise SystemExit(f"{hint_install}\n\nuv sync 执行失败（退出码 {r.returncode}）")
+    venv = ROOT / ".venv" / "Scripts" / "python.exe"
+    if not venv.is_file():
+        raise SystemExit("uv sync 成功但没找到 .venv，请检查 pyproject.toml")
+    print(f"[*] 环境已就绪：{venv}")
 
 
 def check_env(*, skip_exe: bool) -> None:
@@ -258,6 +303,14 @@ def main() -> int:
         # real 形如  '"C:\\path\\python.exe"'  或  'C:\\path\\python.exe'
         path = real.strip().strip('"')
         print(f"[*] 改用真正的 Python：{path}\n")
+        cmd = [path, str(Path(__file__).resolve()), *sys.argv[1:]]
+        raise SystemExit(subprocess.call(cmd))
+
+    # ---- 没有可用解释器时，用 uv 现场创建环境 ----
+    real = resolve_python()
+    if real is None:
+        ensure_env()
+        path = real.strip().strip('"')
         cmd = [path, str(Path(__file__).resolve()), *sys.argv[1:]]
         raise SystemExit(subprocess.call(cmd))
 
