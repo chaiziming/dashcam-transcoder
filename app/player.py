@@ -143,16 +143,14 @@ class FrameReader:
         # -ss 放 -i 之后：代理是 mp4 有索引，输入侧 seek 更快，用输入侧
         # 这里用输出侧以保证第一帧精确（代理很小，代价可忽略）
         #
-        # 关于 speed：这里刻意**不**用它做任何时间轴变换（如 setpts）。
-        # 原因：倍速若在管道层改时间轴（把时长压成 1/spd），
-        # 会与主循环的调速互相抵消，表现为「怎么调速看起来都一样」。
-        # 倍速统一由主循环调度实现（改帧间隔即可）。
+        # 关于 speed 与 fps：
+        #   - speed 完全不用（倍速由主循环调度实现，见 main.py）
+        #   - fps 固定为标称值，不放大
         #
-        # fps 必须给足最高需求（play_fps × 最大倍速），否则高速倍速会被管道限流：
-        # 管道只吐 15fps，主循环想要 30/60fps 也拿不到，
-        # 表现为「调到 2x 以上就没区别了」。主循环会自己按倍速节流，
-        # 多余的帧被丢弃，不影响正确性。
-        vf = f"fps={self.fps * MAX_SPEED}"
+        # 踩过的坑：曾把这里改成 fps=self.fps*MAX_SPEED（=60）想「给高速倍速备帧」，
+        # 结果管道以 60fps 灌数据、主循环只按 15fps 读，管道里堆满帧，
+        # read_frame 变慢，表现为「默认播放就很慢」。已回退。
+        vf = f"fps={self.fps}"
         cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error",
                "-i", str(self.proxy)]
         if start_sec > 0:

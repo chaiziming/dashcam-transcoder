@@ -186,27 +186,30 @@ class PlayerBar(ttk.Frame):
                                   style="Muted.TLabel", width=15, anchor="center")
         self.lbl_time.grid(row=0, column=7, sticky="e", padx=6)
 
-        self.var_speed = tk.DoubleVar(value=1.0)
+        # --- 倍速下拉 ---
+        # 只提供固定档位，不允许手动输入（state="readonly"）。
+        # 用纯字符串做值，不用 DoubleVar：之前用 DoubleVar 配浮点 values
+        # 却 set("1x")，类型不匹配会导致下拉框显示异常、选择事件不触发。
+        self._speed_labels = ("0.25x", "0.5x", "1x", "2x", "3x")
+        self.var_speed = tk.StringVar(value="1x")
         self.cmb_speed = ttk.Combobox(self, textvariable=self.var_speed,
-                                      values=(0.25, 0.5, 1.0, 1.5, 2.0, 4.0),
-                                      width=5, state="readonly")
+                                      values=self._speed_labels,
+                                      width=6, state="readonly")
         self.cmb_speed.grid(row=0, column=8, sticky="e", padx=(0, 2))
         self.cmb_speed.bind("<<ComboboxSelected>>", self._on_speed)
         ttk.Label(self, text="倍速", style="Muted.TLabel").grid(
             row=0, column=9, sticky="e")
-
-        # 速度下拉显示友好文案
-        self._speed_labels = {"0.25": "0.25x", "0.5": "0.5x", "1.0": "1x",
-                              "1.5": "1.5x", "2.0": "2x", "4.0": "4x"}
-        self.cmb_speed.set("1x")
 
         self._enable_all(False)
 
     def _enable_all(self, on: bool) -> None:
         st = "normal" if on else "disabled"
         for w in (self.btn_play, self.btn_stop, self.btn_back5, self.btn_fwd5,
-                  self.btn_back30, self.btn_fwd30, self.cmb_speed):
+                  self.btn_back30, self.btn_fwd30):
             w.config(state=st)
+        # 倍速下拉必须保持 readonly：state="normal" 会变成可编辑输入框，
+        # 用户能手动敲速度值，导致下拉框失去约束。
+        self.cmb_speed.config(state="readonly" if on else "disabled")
 
     def set_ready(self, ready: bool) -> None:
         self._enable_all(bool(ready))
@@ -220,9 +223,12 @@ class PlayerBar(ttk.Frame):
         self.lbl_time.config(text=f"{hhmmss_ms(pos)} / {hhmmss_ms(dur)}")
 
     def _on_speed(self, _e=None) -> None:
+        """倍速下拉变更。state="readonly" 保证只有合法档位能进来。"""
         label = self.var_speed.get()
         try:
             speed = float(label.rstrip("x"))
         except (AttributeError, ValueError):
             speed = 1.0
+        # 让下拉框立刻显示新值（readonly 下手动 set 也生效）
+        self.cmb_speed.set(f"{speed:g}x")
         self.app.on_speed_change(speed)
