@@ -157,7 +157,110 @@ def prepare_ffmpeg(assets: Path) -> bool:
     return True
 
 
+def resolve_python() -> str | None:
+    """找一个真正能用的 Python 可执行文件。
+
+    背景：Windows 会在 `PATH` 里塞一个 0 字节的
+    `Microsoft\\WindowsApps\\python.exe` 占位程序，它执行任何脚本都
+    直接返回 9009 且没有任何输出 —— 表现为「运行了但什么都没发生」。
+    这里必须排除它，否则构建脚本会静默失败。
+    """
+    def usable(p: str) -> bool:
+        try:
+            if "WindowsApps" in p:
+                return False
+            r = subprocess.run([p, "-c", "print(1)"], capture_output=True,
+                               text=True, timeout=15)
+            return r.returncode == 0 and "1" in (r.stdout or "")
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    # 1) py 启动器（官方安装包会装这个）
+    launcher = shutil.which("py")
+    if launcher:
+        r = subprocess.run([launcher, "-3", "-c", "import sys;print(sys.executable)"],
+                           capture_output=True, text=True, timeout=15)
+        if r.returncode == 0 and (r.stdout or "").strip():
+            return f'"{launcher}" -3'
+
+    # 2) PATH 里的 python（跳过 WindowsApps 占位）
+    for p in (shutil.which("python") or "", shutil.which("python3") or ""):
+        if p and usable(p):
+            return f'"{p}"'
+
+    # 3) 常见安装位置
+    roots = [
+        Path.home() / "AppData/Local/Programs/Python",
+        Path("C:/Program Files/Python313"), Path("C:/Program Files/Python312"),
+        Path("C:/Python313"), Path("C:/Python312"),
+        # 开发工具自带的运行时
+        Path.home() / ".workbuddy/binaries/python/versions",
+        Path.home() / ".local/bin",
+    ]
+    for root in roots:
+        if not root.is_dir():
+            continue
+        if root.name == "versions":
+            cands = [d / "python.exe" for d in sorted(root.iterdir(), reverse=True)
+                     if d.is_dir()]
+        else:
+            cands = list(root.glob("Python3*/python.exe")) + [root / "python.exe"]
+        for c in cands:
+            if c.is_file() and usable(str(c)):
+                return f'"{c}"'
+    return None
+
+
+def check_env(*, skip_exe: bool) -> None:
+    """构建前自检，把问题说清楚，别让用户对着闪退的窗口猜。"""
+    print(f"    Python: {sys.version.split()[0]}  ({sys.executable})")
+
+    # 微软商店的占位程序：能 import 但不是真 Python
+    if "WindowsApps" in sys.executable:
+        print("    [警告] 当前 Python 来自 WindowsApps，可能是微软商店的占位程序。")
+        print("           建议改装 python.org 版本（勾选 Add to PATH）。")
+
+    missing: list[str] = []
+    if not skip_exe:
+        try:
+            import PyInstaller  # noqa: F401
+        except ImportError:
+            missing.append("pyinstaller")
+    try:
+        import tkinterdnd2  # noqa: F401
+    except ImportError:
+        missing.append("tkinterdnd2")
+
+    if missing:
+        raise SystemExit(
+            "缺少依赖：" + " ".join(missing) + "\n"
+            f"请执行：{sys.executable} -m pip install " + " ".join(missing))
+
+    if not find_iscc():
+        print("    [警告] 未找到 Inno Setup，将只能产出免安装版。")
+        print("           需要安装包请下载：https://jrsoftware.org/isdl.php")
+    else:
+        print(f"    Inno Setup: {find_iscc()}")
+
+
 def main() -> int:
+    # ---- Python 有效性自检（必须在最前面）----
+    # 被 Microsoft Store 的 0 字节 python.exe 调用时，脚本会「执行了但毫无输出」。
+    # 这里提前拦下来，并自动改用真正可用的 Python 重新执行。
+    if "WindowsApps" in sys.executable:
+        print("[!] 检测到当前 python 是微软商店的占位程序（0 字节，不可用）。")
+        real = resolve_python()
+        if real is None:
+            raise SystemExit(
+                "\n找不到真正可用的 Python。\n\n"
+                "请到 https://www.python.org/downloads/ 安装，\n"
+                "安装时务必勾选「Add python.exe to PATH」，装完重新运行本脚本。")
+        # real 形如  '"C:\\path\\python.exe"'  或  'C:\\path\\python.exe'
+        path = real.strip().strip('"')
+        print(f"[*] 改用真正的 Python：{path}\n")
+        cmd = [path, str(Path(__file__).resolve()), *sys.argv[1:]]
+        raise SystemExit(subprocess.call(cmd))
+
     ap = argparse.ArgumentParser(
         description="本地构建安装包（与 GitHub Releases 产物一致）")
     ap.add_argument("--version", help="版本号，默认取 git describe")
@@ -190,6 +293,10 @@ def main() -> int:
         for d in (dist, outdir):
             shutil.rmtree(d, ignore_errors=True)
         shutil.rmtree(assets, ignore_errors=True)
+
+    # ---- 0. 环境自检 ----
+    step("环境自检")
+    check_env(skip_exe=args.skip_exe)
 
     # ---- 1. ffmpeg ----
     step("准备 ffmpeg")
