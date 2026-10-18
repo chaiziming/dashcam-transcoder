@@ -1358,15 +1358,28 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         w, h, rgb = frame
         self._show_rgb(w, h, rgb)
 
-        # 位置按真实时钟推导：掉帧时不会越走越快
+        # 倍速语义：spd 倍速 = 每秒显示 spd 秒的媒体内容。
+        # 实现方式只有一个杠杆 —— 「帧间隔」（决定画面节奏），
+        # 而位置推进必须始终等于真实流逝时间 × spd，两者才自洽。
+        #
+        # 关键：位置推进量不能乘 spd 之外再改帧间隔，否则会和位置自相矛盾。
+        # 正确做法：
+        #   帧间隔 = 标称间隔 / spd   → 0.25x 时每 267ms 一帧（画面变慢）
+        #   位置 += 真实流逝时间       → 位置跟着画面一起慢，比例自然正确
+        spd = max(0.25, min(4.0, float(self.speed or 1.0)))
+
+        # 位置按真实时钟 × 倍速推进：2x 时真实过 1 秒，位置应前进 2 秒。
+        # 注意 frame_cost 已经含了「等待下一帧」的时间，
+        # 所以基准间隔也要按倍速放大，兜底阈值才与倍速自洽。
         now = time.perf_counter()
         frame_cost = now - self._stream_start
         self._stream_start = now
         # 兜底：单帧推进量超过标称帧间隔的 5 倍说明管道卡顿，
         # 此时按标称值推进，否则位置会瞬间冲到片尾。
-        nominal = 1.0 / max(1.0, self.play_fps)
-        step = frame_cost if frame_cost <= nominal * 5 else nominal
-        self._stream_pos += step * max(self.speed, 0.01)
+        nominal = (1.0 / max(1.0, self.play_fps)) * spd
+        real_step = frame_cost * spd
+        step = real_step if real_step <= nominal * 5 else nominal
+        self._stream_pos += step
 
         dur = self.info.duration if self.info else None
         if dur:
@@ -1374,12 +1387,8 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.position = self._stream_pos
         self.player_bar.update_time(self.position, dur)
 
-        interval_ms = int(1000.0 / max(1.0, self.play_fps))
-        # 关键：倍速必须同时作用于「帧间隔」和「位置推进」。
-        # 只改 step 的话，画面依然是每秒 15 帧（节奏不变），
-        # 只是进度条走得慢 —— 用户看着就像倍速没生效。
-        spd = max(0.25, min(4.0, float(self.speed or 1.0)))
-        interval_ms = int(interval_ms / spd)
+        # 只有帧间隔按倍速缩放 —— 这是画面「看起来快/慢」的唯一来源
+        interval_ms = int(1000.0 / max(1.0, self.play_fps) / spd)
         delay = max(0, interval_ms - int(frame_cost * 1000))
         self._schedule_next_frame(delay)
 
@@ -1468,13 +1477,18 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
                 self._schedule_next_frame(0)
 
     def on_speed_change(self, speed: float) -> None:
-        self.speed = float(speed)
+        """切换倍速。
+
+        倍速只影响「帧间隔」，由播放循环每帧重算，
+        所以这里只需更新 self.speed —— 不需要重启管道或中断播放。
+        暂停时改同样有效，下次播放立即按新倍速走。
+        """
+        self.speed = max(0.25, min(4.0, float(speed)))
         if self.playing:
-            # 重新起播以应用新倍速
-            pos = self.position
-            self._pause()
-            self.position = pos
-            self._play()
+            # 立刻按新倍速调度下一帧，用户马上能看出变化
+            self._cancel_play_job()
+            interval_ms = int(1000.0 / max(1.0, self.play_fps) / self.speed)
+            self._play_job = self.after(max(1, interval_ms), self._on_frame)
 
     # ---------- 处理 ----------
     def on_start(self) -> None:

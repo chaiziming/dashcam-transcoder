@@ -16,6 +16,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# 支持的最大倍速。与 player_bar 的倍速下拉选项（最大 4x）保持一致。
+# 管道要按「标称帧率 × MAX_SPEED」输出，否则高速倍速会被限流。
+MAX_SPEED = 4.0
+
 
 @dataclass
 class ProxySpec:
@@ -138,10 +142,17 @@ class FrameReader:
             return False
         # -ss 放 -i 之后：代理是 mp4 有索引，输入侧 seek 更快，用输入侧
         # 这里用输出侧以保证第一帧精确（代理很小，代价可忽略）
-        spd = max(0.25, min(4.0, float(speed)))
-        vf = f"fps={self.fps}"
-        if abs(spd - 1.0) > 0.01:
-            vf = f"setpts={1/spd:.4f}*PTS,{vf}"
+        #
+        # 关于 speed：这里刻意**不**用它做任何时间轴变换（如 setpts）。
+        # 原因：倍速若在管道层改时间轴（把时长压成 1/spd），
+        # 会与主循环的调速互相抵消，表现为「怎么调速看起来都一样」。
+        # 倍速统一由主循环调度实现（改帧间隔即可）。
+        #
+        # fps 必须给足最高需求（play_fps × 最大倍速），否则高速倍速会被管道限流：
+        # 管道只吐 15fps，主循环想要 30/60fps 也拿不到，
+        # 表现为「调到 2x 以上就没区别了」。主循环会自己按倍速节流，
+        # 多余的帧被丢弃，不影响正确性。
+        vf = f"fps={self.fps * MAX_SPEED}"
         cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error",
                "-i", str(self.proxy)]
         if start_sec > 0:
