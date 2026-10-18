@@ -21,9 +21,8 @@ echo ==========================================================
 echo.
 
 set "PY="
-set "UV_CMD="
 
-REM ---------- 1. 优先用项目自带的 .venv ----------
+REM ---------- 1. 优先用项目自带的 .venv（uv sync 建好就一直可用）----------
 if exist ".venv\Scripts\python.exe" (
     ".venv\Scripts\python.exe" -c "print(1)" >nul 2>&1
     if not errorlevel 1 (
@@ -32,11 +31,7 @@ if exist ".venv\Scripts\python.exe" (
     )
 )
 
-REM ---------- 2. uv（如果没有 .venv 但装了 uv，就用 uv 跑） ----------
-where uv >nul 2>&1
-if not errorlevel 1 set "UV_CMD=uv"
-
-REM ---------- 3. py 启动器 ----------
+REM ---------- 2. py 启动器 ----------
 if not defined PY (
     where py >nul 2>&1
     if not errorlevel 1 (
@@ -100,12 +95,12 @@ if not defined PY (
     echo   Windows 自带的 Microsoft\WindowsApps\python.exe 是 0 字节占位文件，
     echo   执行任何脚本都不会真正运行。
     echo.
-    echo   推荐用 uv（不污染系统，可完全管理 Python 版本）：
+    echo   推荐用 uv 管理（不往系统 PATH 塞任何东西）：
     echo.
     echo     winget install --id astral-sh.uv
     echo     uv sync
     echo.
-    echo   装完 uv 后重新双击本文件即可。
+    echo   之后双击本文件即可（会自动用 .venv）。
     echo.
     echo   或者安装正式版 Python：
     echo     https://www.python.org/downloads/

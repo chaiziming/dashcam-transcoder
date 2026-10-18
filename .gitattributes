@@ -1,0 +1,14 @@
+# Windows 批处理必须用 CRLF，否则 cmd.exe 里的 goto/label 会失效，
+# 表现为双击 .bat 完全没反应。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 源码与配置统一 LF
+*.py text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.iss text eol=crlf
+*.spec text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.json text eol=lf

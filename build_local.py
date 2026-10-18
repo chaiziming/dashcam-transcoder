@@ -332,9 +332,15 @@ def main() -> int:
     print(f"本地构建  版本={version}  预设={args.preset}")
     print("=" * 62)
 
-    total = 5 if args.skip_exe else 6
-    if args.skip_inno:
-        total -= 1
+    # 步骤总数：自检 + ffmpeg + 图标 + [打包exe] + 组装 + 免安装版 + [安装包]
+    # （--clean 会多出「清理」一步，--skip-exe / --skip-inno 会少步骤）
+    total = 5                      # 自检/ffmpeg/图标/组装/免安装版
+    if not args.skip_exe:
+        total += 1
+    if not args.skip_inno:
+        total += 1
+    if args.clean:
+        total += 1
     step = Step(total)
 
     dist = ROOT / "dist"
