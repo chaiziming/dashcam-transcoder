@@ -8,26 +8,18 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-ACCENT = "#2f6feb"
+from .theme import ACCENT, FG as HEAD
+from .timeutil import hhmmss_short as hhmmss_ms
+
+# 进度条专用配色（只在播放器控制条用，不进 theme 以免污染全局）
 ACCENT_DIM = "#9db8e8"
 TRACK = "#dfe4ea"
 TRACK_BG = "#c8ccd4"
-HEAD = "#1f2933"
 
 # 控制条各部分高度（像素）。显式固定，避免两行都被外层拉高、看起来错位。
 BAR_ROW_H = 22        # 进度条行高（含时间标签）
 BTN_ROW_H = 34        # 按钮行高
 TRACK_H = 20# 进度条 Canvas 高度
-
-
-def hhmmss_ms(sec: float | None) -> str:
-    """秒 -> MM:SS 或 HH:MM:SS。"""
-    if sec is None or sec < 0:
-        return "--:--"
-    sec = float(sec)
-    m, s = divmod(int(sec), 60)
-    h, m = divmod(m, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
 class SeekBar(tk.Frame):

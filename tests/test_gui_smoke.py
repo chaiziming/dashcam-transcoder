@@ -94,7 +94,7 @@ def build_ui() -> None:
     # 逐项检查关键控件存在
     for name in ("btn_choose", "btn_start", "btn_cancel", "btn_play",
                  "btn_open_dir", "canvas_box", "lst_regions",
-                 "ent_start", "ent_end", "cmb_crf", "var_vin", "var_crf"):
+                 "tin_start", "tin_end", "cmb_crf", "var_vin", "var_crf"):
         check(f"控件 {name} 已创建", hasattr(app, name))
 
     # 画布空态应能绘制
