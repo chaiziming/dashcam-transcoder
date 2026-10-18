@@ -136,52 +136,64 @@ class SeekBar(tk.Frame):
 
 
 class PlayerBar(ttk.Frame):
-    """完整播放控制条：后跳/播放/前跳 + 进度条 + 时间 + 速度。"""
+    """完整播放控制条：播放/停止/快退快进 + 进度条 + 时间 + 速度。
+
+    布局说明：列 0~5 放按钮（宽度固定），弹性权重全部给进度条所在的列。
+    早期版本把 weight 给了播放按钮所在列，窗口不够宽时按钮会被压到看不见，
+    所以这里严格保证「按钮列固定、进度条伸缩」。
+    """
 
     def __init__(self, master, app):
         super().__init__(master, style="Card.TFrame")
         self.app = app
-        self.columnconfigure(1, weight=1)
+        # 只有进度条列有弹性；按钮列一律固定宽度
+        self.columnconfigure(6, weight=1)
 
         # --- 左侧控制按钮 ---
-        self.btn_back5 = ttk.Button(self, text="« 5s", width=6,
-                                    command=lambda: app.on_seek_delta(-5))
-        self.btn_back5.grid(row=0, column=0, sticky="w", padx=(0, 3))
-
+        # 播放/暂停
         self.btn_play = ttk.Button(self, text="▶", width=3,
                                    command=app.on_toggle_play)
-        self.btn_play.grid(row=0, column=1, sticky="w", padx=3)
+        self.btn_play.grid(row=0, column=0, sticky="w", padx=(0, 4))
+
+        # 停止：暂停并回到开头
+        self.btn_stop = ttk.Button(self, text="■", width=3,
+                                   command=app.on_stop_play)
+        self.btn_stop.grid(row=0, column=1, sticky="w", padx=(0, 8))
+
+        self.btn_back5 = ttk.Button(self, text="« 5s", width=6,
+                                    command=lambda: app.on_seek_delta(-5))
+        self.btn_back5.grid(row=0, column=2, sticky="w", padx=3)
 
         self.btn_fwd5 = ttk.Button(self, text="5s »", width=6,
                                    command=lambda: app.on_seek_delta(5))
-        self.btn_fwd5.grid(row=0, column=2, sticky="w", padx=3)
+        self.btn_fwd5.grid(row=0, column=3, sticky="w", padx=3)
 
         self.btn_back30 = ttk.Button(self, text="« 30s", width=6,
                                      command=lambda: app.on_seek_delta(-30))
-        self.btn_back30.grid(row=0, column=3, sticky="w", padx=(8, 3))
+        self.btn_back30.grid(row=0, column=4, sticky="w", padx=(8, 3))
 
         self.btn_fwd30 = ttk.Button(self, text="30s »", width=6,
                                     command=lambda: app.on_seek_delta(30))
-        self.btn_fwd30.grid(row=0, column=4, sticky="w", padx=3)
+        self.btn_fwd30.grid(row=0, column=5, sticky="w", padx=3)
 
-        # --- 进度条 ---
+        # --- 进度条（唯一伸缩列）---
         self.seek = SeekBar(self, on_seek=app.on_seek_to,
                             on_scrub=app.on_scrub)
-        self.seek.grid(row=0, column=5, sticky="ew", padx=10)
+        self.seek.grid(row=0, column=6, sticky="ew", padx=10)
 
         # --- 时间与速度 ---
         self.lbl_time = ttk.Label(self, text="--:-- / --:--",
                                   style="Muted.TLabel", width=15, anchor="center")
-        self.lbl_time.grid(row=0, column=6, sticky="e", padx=6)
+        self.lbl_time.grid(row=0, column=7, sticky="e", padx=6)
 
         self.var_speed = tk.DoubleVar(value=1.0)
         self.cmb_speed = ttk.Combobox(self, textvariable=self.var_speed,
                                       values=(0.25, 0.5, 1.0, 1.5, 2.0, 4.0),
                                       width=5, state="readonly")
-        self.cmb_speed.grid(row=0, column=7, sticky="e", padx=(0, 2))
+        self.cmb_speed.grid(row=0, column=8, sticky="e", padx=(0, 2))
         self.cmb_speed.bind("<<ComboboxSelected>>", self._on_speed)
         ttk.Label(self, text="倍速", style="Muted.TLabel").grid(
-            row=0, column=8, sticky="e")
+            row=0, column=9, sticky="e")
 
         # 速度下拉显示友好文案
         self._speed_labels = {"0.25": "0.25x", "0.5": "0.5x", "1.0": "1x",
@@ -192,7 +204,7 @@ class PlayerBar(ttk.Frame):
 
     def _enable_all(self, on: bool) -> None:
         st = "normal" if on else "disabled"
-        for w in (self.btn_back5, self.btn_play, self.btn_fwd5,
+        for w in (self.btn_play, self.btn_stop, self.btn_back5, self.btn_fwd5,
                   self.btn_back30, self.btn_fwd30, self.cmb_speed):
             w.config(state=st)
 
@@ -200,6 +212,7 @@ class PlayerBar(ttk.Frame):
         self._enable_all(bool(ready))
 
     def set_playing(self, playing: bool) -> None:
+        """播放中显示暂停图标，暂停时显示播放图标。"""
         self.btn_play.config(text="❚❚" if playing else "▶")
 
     def update_time(self, pos: float, dur: float | None) -> None:

@@ -224,7 +224,13 @@ jobs:
 
           # 逐个跑并完整打印输出与真实退出码。
           # 测试是发布前的质量闸门，失败必须中断 —— 但必须让人看得懂为什么挂。
-          $testList = @("tests.test_core", "tests.test_gui_smoke", "tests.test_idle_state")
+          $testList = @(
+            "tests.test_core",
+            "tests.test_gui_smoke",
+            "tests.test_idle_state",
+            "tests.test_player_bar",
+            "tests.check_workflow"
+          )
           $failed = @()
 
           foreach ($t in $testList) {

@@ -1020,6 +1020,21 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         else:
             self._play()
 
+    def on_stop_play(self) -> None:
+        """停止：暂停并回到 0 秒。
+
+        预览时需要反复从开头看，所以这里等价于「暂停 + 归零」，
+        而不是只暂停（只暂停还得自己拖回开头）。
+        """
+        if not self.proxy:
+            self._notify("预览还没生成好，稍等一下")
+            return
+        # 先停掉播放与管道，避免归零过程中还在推进播放头
+        self._pause()
+        # 跳到开头。on_seek_to 内部会走管道取首帧并刷新画面。
+        self.on_seek_to(0.0)
+        self._notify("已停止并回到开头")
+
     def _play(self) -> None:
         dur = self.info.duration if self.info else None
         # 播到结尾后再按播放，从头开始
