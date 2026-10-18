@@ -40,6 +40,36 @@
 > 也可以跳过安装直接用绿色版：解压即跑。
 > 绿色版需要系统已装 ffmpeg，或把 `ffmpeg.exe`/`ffprobe.exe` 放到程序同级 `ffmpeg/` 目录。
 
+### 本地构建安装包（开发用）
+
+**改完代码想马上试？不用等 GitHub Actions 跑完再下载。**
+
+```bash
+python build_local.py                     # 完整构建，约 2 分钟
+python build_local.py --skip-exe          # 只改界面时代：复用已有 exe，约 100 秒
+python build_local.py --version 1.2.3     # 指定版本号
+python build_local.py --skip-inno         # 没装 Inno Setup 时，只出免安装版
+python build_local.py --clean             # 先清干净再构建
+```
+
+产物在 `dist_installer/`：
+
+- `dashcam-transcoder-<版本>-setup.exe` —— 与 GitHub Releases **完全一致**的安装包
+- `dashcam-transcoder-<版本>-portable/` —— 免安装目录，解压即用
+
+脚本会**自动复用本机已装的 ffmpeg**（`C:\Program Files\ffmpeg\bin` 等），
+不用每次下载 100MB+。版本号默认取最近的 git tag，也可以用 `--version` 指定。
+
+前置条件：
+
+```bash
+pip install pyinstaller tkinterdnd2
+```
+
+编译安装包还需要 [Inno Setup](https://jrsoftware.org/isdl.php)（默认装在
+`C:\Program Files (x86)\Inno Setup 6`）。没装的话用 `--skip-inno`，
+仍然能拿到免安装版测试。
+
 ### 从源码运行
 
 ```bash

@@ -20,6 +20,25 @@
 
 输出文件默认生成在**源文件同目录**，名字是 `原文件名_mosaic.mp4`。
 
+## 附：开发者本地构建
+
+改完代码想立刻看到效果，**不用等 GitHub Actions 跑完再下载**：
+
+```bash
+python build_local.py              # 完整构建，约 2 分钟
+python build_local.py --skip-exe   # 只改了界面：复用已有 exe，约 100 秒
+```
+
+也可以直接**双击 `build.bat`**。
+
+产物在 `dist_installer/`：
+
+- `dashcam-transcoder-<版本>-setup.exe` —— 与线上 Release 完全一致的安装包，双击即装
+- `dashcam-transcoder-<版本>-portable/` —— 免安装目录，解压即用
+
+脚本会自动复用本机已装的 ffmpeg，不用每次下载。
+详见 [README](../README.md) 的「本地构建安装包」章节。
+
 ## 一之二、合并多个分段视频
 
 行车记录仪按时间分段录制，**同一起事故常被切在两个文件里**，

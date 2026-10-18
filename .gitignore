@@ -13,6 +13,8 @@ dist/
 dist*/
 build_assets/
 dist_installer/
+build_assets/_iscc.log
+build_assets/_ffmpeg.zip
 *.manifest
 
 # 打包产物与二进制（体积大，不入库）
