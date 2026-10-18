@@ -100,13 +100,35 @@ def main() -> int:
         check(f"{n1} 与 {n2} 不重叠", not overlaps(b1, b2),
               f"{b1.winfo_width()}px / {b2.winfo_width()}px")
 
-    print("\n== 4. 倍速在按钮行最右 ==")
+    print("\n== 4. 按钮顺序与倍速位置 ==")
+    # 主流播放器排列：«30s «5s ▶ ■ 5s» 30s»，倍速在最右
+    expect_order = ["« 30s", "« 5s", "▶", "■", "5s »", "30s »"]
+    actual_order = [str(b.cget("text")) for b in (
+        bar.btn_back30, bar.btn_back5, bar.btn_play,
+        bar.btn_stop, bar.btn_fwd5, bar.btn_fwd30)]
+    check("按钮顺序为 «30s «5s ▶ ■ 5s» 30s»",
+          actual_order == expect_order, f"{actual_order}")
+
+    xs = [b.winfo_rootx() for b in (
+        bar.btn_back30, bar.btn_back5, bar.btn_play,
+        bar.btn_stop, bar.btn_fwd5, bar.btn_fwd30)]
+    check("按钮从左到右依次排列", xs == sorted(xs), f"x={xs}")
+
     check("倍速在所有按钮右侧",
           bar.cmb_speed.winfo_rootx() > bar.btn_fwd30.winfo_rootx(),
           f"倍速x={bar.cmb_speed.winfo_rootx()} vs 末按钮x={bar.btn_fwd30.winfo_rootx()}")
     check("倍速与按钮同一行（垂直对齐）",
-          abs(bar.cmb_speed.winfo_rooty() - bar.btn_play.winfo_rooty()) < 40,
+          abs(bar.cmb_speed.winfo_rooty() - bar.btn_play.winfo_rooty()) < 20,
           f"倍速y={bar.cmb_speed.winfo_rooty()} btn.y={bar.btn_play.winfo_rooty()}")
+
+    print("\n== 4b. 布局紧凑（不能被纵向拉成瘦高条）==")
+    btn_h = bar.btn_play.winfo_height()
+    seek_h = bar.seek.winfo_height()
+    total_h = bar.winfo_height()
+    print(f"     控制条 {total_h}px（进度条行 {seek_h}px + 按钮行 {btn_h}px）")
+    check("按钮高度正常（24~44px，未被拉伸）", 24 <= btn_h <= 44, f"{btn_h}px")
+    check("进度条行高度正常（14~32px）", 14 <= seek_h <= 32, f"{seek_h}px")
+    check("控制条总高紧凑（< 80px）", total_h < 80, f"{total_h}px")
 
     print("\n== 5. 时间标签在进度条两端 ==")
     lx = bar.lbl_time_left.winfo_rootx() + bar.lbl_time_left.winfo_width()

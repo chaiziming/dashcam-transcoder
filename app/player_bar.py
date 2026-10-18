@@ -14,6 +14,11 @@ TRACK = "#dfe4ea"
 TRACK_BG = "#c8ccd4"
 HEAD = "#1f2933"
 
+# 控制条各部分高度（像素）。显式固定，避免两行都被外层拉高、看起来错位。
+BAR_ROW_H = 22        # 进度条行高（含时间标签）
+BTN_ROW_H = 34        # 按钮行高
+TRACK_H = 20# 进度条 Canvas 高度
+
 
 def hhmmss_ms(sec: float | None) -> str:
     """秒 -> MM:SS 或 HH:MM:SS。"""
@@ -42,18 +47,9 @@ class SeekBar(tk.Frame):
         self.position: float = 0.0
         self._dragging = False
 
-        # 关键：关闭几何传播，让本 Frame 完全由外层 grid 的 sticky="ew" 决定宽度。
-        # 否则 tk 会按子控件（Canvas）请求的尺寸定宽，表现为
-        # 「窗口变宽但进度条恒定一小段」，用户拖动很难定位。
-        # 关闭传播后必须显式给出高度，否则 Frame 会塌成 0 高。
-        self.grid_propagate(False)
-        self.configure(height=26)
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=1)
-
-        self.canvas = tk.Canvas(self, height=26, bg=TRACK_BG,
+        self.canvas = tk.Canvas(self, height=TRACK_H, bg=TRACK_BG,
                                 highlightthickness=0, bd=0, cursor="hand2")
-        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.canvas.pack(fill="both", expand=True)
 
         self.canvas.bind("<Configure>", lambda e: self._redraw())
         self.canvas.bind("<Button-1>", self._on_press)
@@ -168,60 +164,63 @@ class PlayerBar(ttk.Frame):
     def __init__(self, master, app):
         super().__init__(master, style="Card.TFrame")
         self.app = app
-        # 两行用**嵌套 Frame** 隔离，而不是共用同一个 grid。
-        # 原因：Tk 的 grid 列宽是跨行共享的 —— 行 1 的按钮撑宽某列，
-        # 会连带把行 0 的进度条挤窄。嵌套后各自独立，互不影响。
+        # 两行用嵌套 Frame 隔离：Tk 的 grid 列宽是跨行共享的，
+        # 行 1 的按钮撑宽某列会连带把行 0 的进度条挤窄。
+        # 另外两行都关闭几何传播并显式定高，避免被外层纵向拉高、
+        # 看起来像错位（进度条被撑成一个高盒子、按钮被拉成瘦高条）。
 
         # ========== 行 0：时间 + 进度条 ==========
-        top = ttk.Frame(self, style="Card.TFrame")
+        top = ttk.Frame(self, style="Card.TFrame", height=BAR_ROW_H)
         top.pack(fill="x")
+        top.pack_propagate(False)          # 固定高度，不被子控件撑开
         top.columnconfigure(1, weight=1)   # 权重给进度条列
 
         self.lbl_time_left = ttk.Label(top, text="--:--", style="Muted.TLabel",
                                        width=7, anchor="w")
-        self.lbl_time_left.grid(row=0, column=0, sticky="w", pady=(0, 3))
+        self.lbl_time_left.grid(row=0, column=0, sticky="w", padx=(0, 8))
 
         self.seek = SeekBar(top, on_seek=app.on_seek_to,
                             on_scrub=app.on_scrub)
-        self.seek.grid(row=0, column=1, sticky="ew", padx=8, pady=(0, 3))
+        self.seek.grid(row=0, column=1, sticky="ew")
 
         self.lbl_time_right = ttk.Label(top, text="--:--", style="Muted.TLabel",
                                         width=7, anchor="e")
-        self.lbl_time_right.grid(row=0, column=2, sticky="e", pady=(0, 3))
+        self.lbl_time_right.grid(row=0, column=2, sticky="w", padx=(8, 0))
         self._last_time_text = "--:-- / --:--"
 
         # ========== 行 1：控制按钮 ==========
-        bottom = ttk.Frame(self, style="Card.TFrame")
-        bottom.pack(fill="x")
+        # 按钮顺序：«30s «5s ▶ ■ 5s» 30s»，倍速靠最右。
+        # 这是主流播放器的排列 —— 越靠中间时间跨度越小，便于精调。
+        bottom = ttk.Frame(self, style="Card.TFrame", height=BTN_ROW_H)
+        bottom.pack(fill="x", pady=(2, 0))
+        bottom.pack_propagate(False)
         bottom.columnconfigure(6, weight=1)   # 纯占位列，按钮不碰
 
-        # 播放/暂停
+        def mk(txt: str, cmd, width: int = 5):
+            b = ttk.Button(bottom, text=txt, width=width, command=cmd)
+            return b
+
+        self.btn_back30 = mk("« 30s", lambda: app.on_seek_delta(-30), 6)
+        self.btn_back30.grid(row=0, column=0, sticky="w", padx=(0, 2))
+
+        self.btn_back5 = mk("« 5s", lambda: app.on_seek_delta(-5))
+        self.btn_back5.grid(row=0, column=1, sticky="w", padx=2)
+
         self.btn_play = ttk.Button(bottom, text="▶", width=3,
                                    command=app.on_toggle_play)
-        self.btn_play.grid(row=0, column=0, sticky="w")
+        self.btn_play.grid(row=0, column=2, sticky="w", padx=2)
 
-        # 停止：暂停并回到开头
         self.btn_stop = ttk.Button(bottom, text="■", width=3,
                                    command=app.on_stop_play)
-        self.btn_stop.grid(row=0, column=1, sticky="w", padx=(0, 8))
+        self.btn_stop.grid(row=0, column=3, sticky="w", padx=2)
 
-        self.btn_back5 = ttk.Button(bottom, text="« 5s", width=5,
-                                    command=lambda: app.on_seek_delta(-5))
-        self.btn_back5.grid(row=0, column=2, sticky="w", padx=2)
+        self.btn_fwd5 = mk("5s »", lambda: app.on_seek_delta(5))
+        self.btn_fwd5.grid(row=0, column=4, sticky="w", padx=2)
 
-        self.btn_fwd5 = ttk.Button(bottom, text="5s »", width=5,
-                                   command=lambda: app.on_seek_delta(5))
-        self.btn_fwd5.grid(row=0, column=3, sticky="w", padx=2)
-
-        self.btn_back30 = ttk.Button(bottom, text="« 30s", width=6,
-                                     command=lambda: app.on_seek_delta(-30))
-        self.btn_back30.grid(row=0, column=4, sticky="w", padx=(10, 2))
-
-        self.btn_fwd30 = ttk.Button(bottom, text="30s »", width=6,
-                                    command=lambda: app.on_seek_delta(30))
+        self.btn_fwd30 = mk("30s »", lambda: app.on_seek_delta(30), 6)
         self.btn_fwd30.grid(row=0, column=5, sticky="w", padx=2)
 
-        # --- 倍速下拉（右侧）---
+        # --- 倍速下拉（整体最右侧）---
         # 只提供固定档位，不允许手动输入（state="readonly"）。
         # 用纯字符串做值，不用 DoubleVar：之前用 DoubleVar 配浮点 values
         # 却 set("1x")，类型不匹配会导致下拉框显示异常、选择事件不触发。
@@ -229,11 +228,11 @@ class PlayerBar(ttk.Frame):
         self.var_speed = tk.StringVar(value="1x")
         self.cmb_speed = ttk.Combobox(bottom, textvariable=self.var_speed,
                                       values=self._speed_labels,
-                                      width=6, state="readonly")
-        self.cmb_speed.grid(row=0, column=7, sticky="e", padx=(0, 4))
+                                      width=5, state="readonly")
+        self.cmb_speed.grid(row=0, column=7, sticky="e")
         self.cmb_speed.bind("<<ComboboxSelected>>", self._on_speed)
-        ttk.Label(bottom, text="倍速", style="Muted.TLabel").grid(
-            row=0, column=8, sticky="e")
+        # 不额外加「倍速」文字标签：下拉框里的 "1x" 已自解释，
+        # 且多一个标签会把下拉框往左推，破坏「倍速在最右端」的视觉对齐。
 
         self._enable_all(False)
 

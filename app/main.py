@@ -427,9 +427,9 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         card = ttk.Frame(parent, style="Card.TFrame", padding=12)
         card.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         card.columnconfigure(0, weight=1)
-        # 画布在 row=2，只有它需要吃掉多余高度；操作条/标签/提示独占各行，
-        # 不能都挤在 row=0 —— 那样控件会互相覆盖（按钮会被标签挡住）。
-        card.rowconfigure(2, weight=1)
+        # 画布在 row=1，只有它需要吃掉多余高度；顶部操作条 row=0、
+        # 播放控制条 row=2 各占一行，都不该被拉伸。
+        card.rowconfigure(1, weight=1)
 
         # --- 顶部操作条 ---
         top = ttk.Frame(card, style="Card.TFrame")
@@ -455,13 +455,15 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
                                  anchor="w")
         self.lbl_src.grid(row=0, column=1, sticky="ew", padx=(10, 6))
 
-        # --- 播放控制条 ---
-        self.player_bar = PlayerBar(card, self)
-        self.player_bar.grid(row=1, column=0, sticky="ew", pady=(0, 4))
-
         # --- 预览画布 ---
+        # 控制条放在画布**下方**（主流播放器都是控制条在下），
+        # 所以画布占 row=1、控制条占 row=2。
         self.canvas_box = MaskCanvas(card, self)
-        self.canvas_box.grid(row=2, column=0, sticky="nsew")
+        self.canvas_box.grid(row=1, column=0, sticky="nsew")
+
+        # --- 播放控制条（位于视频下方）---
+        self.player_bar = PlayerBar(card, self)
+        self.player_bar.grid(row=2, column=0, sticky="ew", pady=(4, 0))
 
         self.lbl_hint = ttk.Label(
             card,
