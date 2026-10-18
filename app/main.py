@@ -435,13 +435,19 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         top = ttk.Frame(card, style="Card.TFrame")
         top.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         top.columnconfigure(1, weight=1)
-        self.btn_choose = ttk.Button(top, text="选择视频文件…", command=self.on_choose)
+        self.btn_choose = ttk.Button(top, text="添加预览",
+                                     command=self.on_add_preview)
         self.btn_choose.grid(row=0, column=0, sticky="w")
 
         # 合并多个分段视频（行车记录仪按时间分段录制，同一起事故常分散在两个文件里）
-        self.btn_merge = ttk.Button(top, text="合并视频…", command=self.on_merge)
+        self.btn_merge = ttk.Button(top, text="合并", command=self.on_merge)
         self.btn_merge.grid(row=0, column=2, sticky="e")
         self._sync_merge_btn()
+
+# 已添加的预览列表（合并顺序 = 添加顺序）。
+        # 上限 4 个：再多的分段极少见，且列表太长会让界面变啰嗦。
+        self.preview_files: list[Path] = []
+        self.MAX_PREVIEW = 4
 
         # 原来的「换帧预览」按钮已移除：进度条拖拽 + 快进快退已能覆盖同样的需求，
         # 而且它原本直接解码原始裸流，点了会很慢。
@@ -729,7 +735,60 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
             self.lbl_done.config(text="")
             self.lbl_done.grid_remove()
 
+    def on_add_preview(self) -> None:
+        """添加视频到预览列表（可多次添加，顺序即合并顺序）。"""
+        start_dir = self.cfg.get("last_dir") or str(Path.home())
+        paths = filedialog.askopenfilenames(
+            title="选择要预览的视频（可多选）",
+            initialdir=start_dir,
+            filetypes=[("视频文件", " ".join(f"*{e}" for e in VIDEO_EXTS)),
+                       ("h264 裸流", "*.h264"), ("所有文件", "*.*")])
+        if not paths:
+            return
+
+        added, dup, full = 0, 0, 0
+        for p in paths:
+            f = Path(p)
+            if f in self.preview_files:
+                dup += 1
+                continue
+            if len(self.preview_files) >= self.MAX_PREVIEW:
+                full += 1
+                continue
+            self.preview_files.append(f)
+            added += 1
+
+        msgs = []
+        if added:
+            msgs.append(f"已添加 {added} 个")
+        if dup:
+            msgs.append(f"{dup} 个重复已跳过")
+        if full:
+            msgs.append(f"{full} 个超出上限（最多 {self.MAX_PREVIEW} 个）")
+        if msgs:
+            self._notify("；".join(msgs))
+
+        self._refresh_preview_bar()
+        # 第一个视频自动载入主画面，省得再点一次
+        if added and self.src is None:
+            self.load_file(self.preview_files[0])
+
+    def _refresh_preview_bar(self) -> None:
+        """更新顶部的预览列表提示条。"""
+        if not hasattr(self, "lbl_src"):
+            return
+        n = len(self.preview_files)
+        if n == 0:
+            self.lbl_src.config(text="未选择文件")
+            return
+        names = "、".join(f.name for f in self.preview_files[:3])
+        more = f" 等 {n} 个" if n > 3 else ""
+        prefix = f"预览 {n} 个："
+        cur = f.name if getattr(self, "src", None) else ""
+        self.lbl_src.config(text=f"{prefix}{names}{more}" + (f"   （当前：{cur}）" if cur else ""))
+
     def on_choose(self) -> None:
+        """兼容旧入口：等价于添加单个视频。"""
         start_dir = self.cfg.get("last_dir") or str(Path.home())
         path = filedialog.askopenfilename(
             title="选择行车记录仪视频",
@@ -737,7 +796,11 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
             filetypes=[("视频文件", " ".join(f"*{e}" for e in VIDEO_EXTS)),
                        ("h264 裸流", "*.h264"), ("所有文件", "*.*")])
         if path:
-            self.load_file(Path(path))
+            f = Path(path)
+            if f not in self.preview_files:
+                self.preview_files.append(f)
+            self._refresh_preview_bar()
+            self.load_file(f)
 
     # ---------- 合并多个分段视频 ----------
     def _sync_merge_btn(self) -> None:
@@ -747,34 +810,31 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
                 state="normal" if self.ffmpeg and self.ffprobe else "disabled")
 
     def on_merge(self) -> None:
-        """把多个分段视频按顺序拼成一个，并顺带应用当前遮挡设置。
+        """把「添加预览」里已添加的视频按顺序拼成一个，并应用当前遮挡设置。
 
         典型场景：行车记录仪按时间分段录制，同一起事故被切在两个文件里，
         合并后才能看清完整过程。
+
+        不再弹框重新选文件 —— 直接用预览列表（顺序即合并顺序），
+        避免重复选择时漏选、选错顺序。
         """
         if not self.ffmpeg:
             self._notify("ffmpeg 未就绪")
             return
 
-        start_dir = self.cfg.get("last_dir") or str(Path.home())
-        paths = filedialog.askopenfilenames(
-            title="按时间顺序选择要合并的视频（可多选）",
-            initialdir=start_dir,
-            filetypes=[("视频文件", " ".join(f"*{e}" for e in VIDEO_EXTS)),
-                       ("h264 裸流", "*.h264"), ("所有文件", "*.*")])
-        if not paths:
-            return
-
-        files = [Path(p) for p in paths]
+        files = list(getattr(self, "preview_files", []))
+        # 只合并还存在的文件
+        files = [f for f in files if f.is_file()]
         if len(files) < 2:
-            self._notify("至少选择 2 个视频才能合并")
+            self._notify(
+                f"当前只有 {len(files)} 个视频，无法合并。\n"
+                "请先点「添加预览」添加 2 个以上（可分多次添加）。")
             return
 
-        # 裸流没有可读的时长，只能靠文件体积估算总量
         total_mb = sum(f.stat().st_size for f in files) / 1024 / 1024
         if not messagebox.askyesno(
                 "确认合并",
-                f"将按所选顺序合并 {len(files)} 个视频：\n\n"
+                f"将按下面的顺序合并 {len(files)} 个视频：\n\n"
                 + "\n".join(f"  {i+1}. {f.name}" for i, f in enumerate(files))
                 + f"\n\n合并后约 {total_mb:.0f} MB"
                   "\n（输出为 MP4，已内置当前遮挡设置）\n\n是否继续？"):
@@ -955,7 +1015,7 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
                 info.duration = ffmpeg_env.probe_duration_by_counting(
                     self.ffprobe, path, info.fps)
 
-            self.lbl_src.config(text=f"源文件：{path.name}")
+            self._refresh_preview_bar()
             self._refresh_info_text()
 
             # VIN 预设坐标按真实分辨率等比映射
@@ -1315,6 +1375,11 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.player_bar.update_time(self.position, dur)
 
         interval_ms = int(1000.0 / max(1.0, self.play_fps))
+        # 关键：倍速必须同时作用于「帧间隔」和「位置推进」。
+        # 只改 step 的话，画面依然是每秒 15 帧（节奏不变），
+        # 只是进度条走得慢 —— 用户看着就像倍速没生效。
+        spd = max(0.25, min(4.0, float(self.speed or 1.0)))
+        interval_ms = int(interval_ms / spd)
         delay = max(0, interval_ms - int(frame_cost * 1000))
         self._schedule_next_frame(delay)
 

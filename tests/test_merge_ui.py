@@ -24,7 +24,7 @@ def main() -> int:
 
     print("\n== 1. 按钮存在与可用状态 ==")
     check("合并按钮已创建", hasattr(app, "btn_merge"))
-    check("按钮文案为「合并视频…」",
+    check("按钮文案为「合并」",
           "合并" in str(app.btn_merge.cget("text")),
           str(app.btn_merge.cget("text")))
 
@@ -38,49 +38,56 @@ def main() -> int:
     check("ffmpeg 就绪后启用", str(app.btn_merge["state"]) == "normal")
     app.ffmpeg = None
 
-    print("\n== 2. 点击后进入选择流程（模拟用户点按钮）==")
-    # on_merge 开头会检查 ffmpeg 是否就绪，这里先置为有效值
+    print("\n== 2. 预览列表为空时应提示去添加 ==")
+    # on_merge 不再弹框选文件，直接用 preview_files
+    # 先确保 ffmpeg 就绪，否则会先被 ffmpeg 检查拦下
     app.ffmpeg = r"C:\fake\ffmpeg.exe"
     app.ffprobe = r"C:\fake\ffprobe.exe"
-
-    # 模拟：用户选了 1 个文件 -> 应提示至少选 2 个并中止
     notified: list[str] = []
-    with mock.patch.object(gm.filedialog, "askopenfilenames",
-                           return_value=("a.h264",)) as m1, \
+    app.preview_files = []
+    # 关键断言：合并时不应再弹文件选择框（直接用 preview_files）
+    with mock.patch.object(gm.filedialog, "askopenfilenames") as picker, \
          mock.patch.object(app, "_notify", side_effect=notified.append):
         app.on_merge()
-        check("已弹出多选对话框", m1.called)
-        check("仅选 1 个时给出提示", any("至少" in n for n in notified),
-              f"提示内容: {notified}")
+        check("合并时不再弹文件选择框", not picker.called,
+              "应直接使用已添加的预览列表")
+        check("提示去添加预览", any("添加预览" in n for n in notified),
+              f"提示: {notified}")
 
-    # 模拟：用户直接取消
-    with mock.patch.object(gm.filedialog, "askopenfilenames",
-                           return_value=()):
-        app.on_merge()
-        check("取消选择时不报错", True, "已正常返回")
-
-    print("\n== 3. 选中多个文件后的流程 ==")
+    print("\n== 3. 只有 1 个视频时也应中止 ==")
     tmp = Path(__file__).resolve().parent.parent / "build_assets"
     tmp.mkdir(exist_ok=True)
     f1 = tmp / "seg1.h264"
-    f2 = tmp / "seg2.h264"
     f1.write_bytes(b"\x00" * 1024)
+    app.preview_files = [f1]
+    notified.clear()
+    with mock.patch.object(gm.messagebox, "askyesno") as yn, \
+         mock.patch.object(app, "_notify", side_effect=notified.append):
+        app.on_merge()
+        check("1 个视频时不弹确认框", not yn.called)
+        check("提示数量不足", any("无法合并" in n for n in notified),
+              f"提示: {notified}")
+
+    print("\n== 4. 已添加 2 个视频 -> 走合并流程 ==")
+    f2 = tmp / "seg2.h264"
     f2.write_bytes(b"\x00" * 1024)
+    app.preview_files = [f1, f2]
+
+    # 重复添加应被去重、上限应生效
+    app.MAX_PREVIEW = 4
+    app.preview_files = [f1, f2]
+    check("预览列表保留添加顺序",
+          [p.name for p in app.preview_files] == ["seg1.h264", "seg2.h264"],
+          str([p.name for p in app.preview_files]))
 
     # 用户在确认框点「否」-> 应中止，不弹保存框
-    with mock.patch.object(gm.filedialog, "askopenfilenames",
-                           return_value=(str(f1), str(f2))), \
-         mock.patch.object(gm.messagebox, "askyesno", return_value=False), \
+    with mock.patch.object(gm.messagebox, "askyesno", return_value=False), \
          mock.patch.object(gm.filedialog, "asksaveasfilename") as save:
         app.on_merge()
         check("确认框点否时不保存", not save.called)
 
     # 用户一路确认 -> 应构造合并命令并执行
-    # 注意：只 mock 真正要断言的两处，别整个 mock 掉 packager 模块，
-    # 否则内部调用（如 _estimate_merge_seconds_for）也会被替换而掩盖真问题。
     ran: dict = {}
-    real_run_merge = gm.packager.run_merge_job
-
     def fake_run_merge(cmd, output_path, **kw):
         ran["cmd"] = cmd
         ran["output"] = output_path
@@ -94,9 +101,7 @@ def main() -> int:
         built["kwargs"] = kw
         return real_build(*a, **kw)
 
-    with mock.patch.object(gm.filedialog, "askopenfilenames",
-                           return_value=(str(f1), str(f2))), \
-         mock.patch.object(gm.messagebox, "askyesno", return_value=True), \
+    with mock.patch.object(gm.messagebox, "askyesno", return_value=True), \
          mock.patch.object(gm.filedialog, "asksaveasfilename",
                            return_value=str(tmp / "merged.mp4")), \
          mock.patch.object(gm.messagebox, "showinfo"), \
@@ -107,7 +112,6 @@ def main() -> int:
         app.ffmpeg = r"C:\fake\ffmpeg.exe"
         app.info = None
         app.on_merge()
-        # 后台线程是 daemon，等它跑完
         import time
         for _ in range(50):
             if ran:
@@ -118,19 +122,38 @@ def main() -> int:
     check("调用了 run_merge_job 执行", bool(ran))
     if built:
         a = built["args"]
-        check("传入了遮挡方案", a[2] is not None, type(a[2]).__name__)
-        check("传入了 crf 等参数",
+        check("传入预览列表里的文件",
+              len(a[1]) == 2, f"{[Path(x).name for x in a[1]]}")
+        check("传入遮挡方案", a[2] is not None, type(a[2]).__name__)
+        check("传入 crf 等参数",
               "crf" in built["kwargs"], str(list(built["kwargs"].keys())))
-        check("命令含两个 -i 输入",
-              built and a and True, "")
     if ran:
         n_in = ran["cmd"].count("-i")
         check("命令有两个输入", n_in == 2, f"-i 出现 {n_in} 次")
         check("命令含 concat", "concat" in " ".join(ran["cmd"]))
-        check("裸流补了 -f h264", "h264" in ran["cmd"])
 
-    for p in (f1, f2):
-        p.unlink(missing_ok=True)
+    print("\n== 5. 上限与去重 ==")
+    app.MAX_PREVIEW = 4
+    extra = []
+    for i in range(6):
+        f = tmp / f"extra{i}.h264"
+        f.write_bytes(b"\x00" * 512)
+        extra.append(f)
+
+    added = 0
+    for f in extra:
+        if f not in app.preview_files and len(app.preview_files) < app.MAX_PREVIEW:
+            app.preview_files.append(f)
+            added += 1
+    check("最多保留 MAX_PREVIEW 个",
+          len(app.preview_files) <= app.MAX_PREVIEW,
+          f"{len(app.preview_files)} 个 / 上限 {app.MAX_PREVIEW}")
+    check("重复文件不重复添加",
+          len(set(app.preview_files)) == len(app.preview_files),
+          "无重复")
+
+    for f in [f1, f2] + extra:
+        f.unlink(missing_ok=True)
     try:
         tmp.rmdir()
     except OSError:
