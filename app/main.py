@@ -170,8 +170,10 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         top = ttk.Frame(card, style="Card.TFrame")
         top.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         top.columnconfigure(1, weight=1)
-        self.btn_choose = ttk.Button(top, text="添加预览",
-                                     command=self.on_add_preview)
+        # 不用弹框选文件了：点一下就在画面上直接开一个可拖拽的遮挡区，
+        # 省掉「先选文件再框选」的两步操作。
+        self.btn_choose = ttk.Button(top, text="添加区域",
+                                     command=self.on_add_region)
         self.btn_choose.grid(row=0, column=0, sticky="w")
 
         # 合并多个分段视频（行车记录仪按时间分段录制，同一起事故常分散在两个文件里）
@@ -179,10 +181,9 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.btn_merge.grid(row=0, column=2, sticky="e")
         self._sync_merge_btn()
 
-# 已添加的预览列表（合并顺序 = 添加顺序）。
-        # 上限 4 个：再多的分段极少见，且列表太长会让界面变啰嗦。
+        # 已添加的预览文件列表（合并顺序 = 拖入顺序）。
+        # 只由拖放添加，所以没有数量上限：拖几个就合几个。
         self.preview_files: list[Path] = []
-        self.MAX_PREVIEW = 4
 
         # 原来的「换帧预览」按钮已移除：进度条拖拽 + 快进快退已能覆盖同样的需求，
         # 而且它原本直接解码原始裸流，点了会很慢。
@@ -219,6 +220,32 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.lbl_info = ttk.Label(side, text="—", style="Muted.TLabel",
                                   justify="left", wraplength=330)
         self.lbl_info.grid(row=r, column=0, sticky="w", pady=(0, 10))
+        r += 1
+
+        # --- 合并列表（拖入的视频，按拖入顺序合并）---
+        ttk.Label(side, text="合并列表（拖入视频，按拖入顺序合并）",
+                  style="Section.TLabel").grid(row=r, column=0, sticky="w",
+                                                pady=(0, 4))
+        r += 1
+        self.lbl_list_hint = ttk.Label(
+            side, text="把 .h264 文件拖到窗口即可加入", style="Muted.TLabel")
+        self.lbl_list_hint.grid(row=r, column=0, sticky="w", pady=(0, 4))
+        r += 1
+
+        self.lst_files = tk.Listbox(
+            side, height=5, font=("Consolas", 9), activestyle="none",
+            highlightthickness=1, highlightbackground=BORDER, borderwidth=0,
+            selectbackground="#dce8fb", selectforeground=FG)
+        self.lst_files.grid(row=r, column=0, sticky="ew", pady=(2, 4))
+        self.lst_files.bind("<<ListboxSelect>>", self._on_file_item_toggle)
+        r += 1
+
+        frow = ttk.Frame(side, style="Card.TFrame")
+        frow.grid(row=r, column=0, sticky="ew", pady=(0, 10))
+        ttk.Button(frow, text="移除选中", command=self.on_remove_file).pack(
+            side="left")
+        ttk.Button(frow, text="清空列表",
+                   command=self.on_clear_files).pack(side="left", padx=(6, 0))
         r += 1
 
         # 遮挡设置
@@ -481,43 +508,33 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
             self.lbl_done.config(text="")
             self.lbl_done.grid_remove()
 
-    def on_add_preview(self) -> None:
-        """添加视频到预览列表（可多次添加，顺序即合并顺序）。"""
-        start_dir = self.cfg.get("last_dir") or str(Path.home())
-        paths = filedialog.askopenfilenames(
-            title="选择要预览的视频（可多选）",
-            initialdir=start_dir,
-            filetypes=[("视频文件", " ".join(f"*{e}" for e in VIDEO_EXTS)),
-                       ("h264 裸流", "*.h264"), ("所有文件", "*.*")])
-        if not paths:
+    def on_add_region(self) -> None:
+        """在画面中央新建一个可拖拽的遮挡区（上限 4 个）。
+
+        原来是弹框选视频文件；现在视频靠拖放加入合并列表，
+        这个按钮专管「加一个遮挡框」，少一步操作。
+        """
+        MAX_REGIONS = 4
+        regions = self.canvas_box.regions
+        if len(regions) >= MAX_REGIONS:
+            self._notify(f"最多 {MAX_REGIONS} 个自定义区域，先删除一个再添加")
             return
 
-        added, dup, full = 0, 0, 0
-        for p in paths:
-            f = Path(p)
-            if f in self.preview_files:
-                dup += 1
-                continue
-            if len(self.preview_files) >= self.MAX_PREVIEW:
-                full += 1
-                continue
-            self.preview_files.append(f)
-            added += 1
+        # 需要真实分辨率才能换算坐标；没有视频时按 1920x1080 先摆着
+        vw = self.canvas_box.video_w or REF_W
+        vh = self.canvas_box.video_h or REF_H
+        w = max(80, vw // 5)
+        h = max(48, vh // 8)
+        # 依次错开一点，避免每次都叠在正中间看不清是新加的还是旧的
+        n = len(regions)
+        x = (vw - w) // 2 + (n % 3) * 18
+        y = (vh - h) // 2 + (n % 3) * 18
 
-        msgs = []
-        if added:
-            msgs.append(f"已添加 {added} 个")
-        if dup:
-            msgs.append(f"{dup} 个重复已跳过")
-        if full:
-            msgs.append(f"{full} 个超出上限（最多 {self.MAX_PREVIEW} 个）")
-        if msgs:
-            self._notify("；".join(msgs))
-
-        self._refresh_preview_bar()
-        # 第一个视频自动载入主画面，省得再点一次
-        if added and self.src is None:
-            self.load_file(self.preview_files[0])
+        regions.append(MaskRegion(x=max(0, x), y=max(0, y), w=w, h=h,
+                                  label="自定义"))
+        self.canvas_box._redraw()
+        self.on_regions_changed()
+        self._notify("已添加区域：拖动可移动，右键点击可删除")
 
     def _refresh_preview_bar(self) -> None:
         """更新顶部的预览列表提示条。"""
@@ -530,23 +547,117 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         names = "、".join(f.name for f in self.preview_files[:3])
         more = f" 等 {n} 个" if n > 3 else ""
         prefix = f"预览 {n} 个："
-        cur = f.name if getattr(self, "src", None) else ""
-        self.lbl_src.config(text=f"{prefix}{names}{more}" + (f"   （当前：{cur}）" if cur else ""))
+        cur = self.src.name if getattr(self, "src", None) else ""
+        self.lbl_src.config(
+            text=f"{prefix}{names}{more}"
+                 + (f"   （当前：{cur}）" if cur else ""))
 
-    def on_choose(self) -> None:
-        """兼容旧入口：等价于添加单个视频。"""
-        start_dir = self.cfg.get("last_dir") or str(Path.home())
-        path = filedialog.askopenfilename(
-            title="选择行车记录仪视频",
-            initialdir=start_dir,
-            filetypes=[("视频文件", " ".join(f"*{e}" for e in VIDEO_EXTS)),
-                       ("h264 裸流", "*.h264"), ("所有文件", "*.*")])
-        if path:
-            f = Path(path)
-            if f not in self.preview_files:
-                self.preview_files.append(f)
-            self._refresh_preview_bar()
-            self.load_file(f)
+    # ---------- 合并列表（拖放加入，可取消）----------
+
+    def _add_files(self, paths: list[Path]) -> None:
+        """把视频加入合并列表（去重、不限量），并刷新列表显示。"""
+        added = 0
+        dup = 0
+        for p in paths:
+            if p in self.preview_files:
+                dup += 1
+                continue
+            self.preview_files.append(p)
+            added += 1
+        msgs = []
+        if added:
+            msgs.append(f"已加入 {added} 个")
+        if dup:
+            msgs.append(f"{dup} 个重复已跳过")
+        if msgs:
+            self._notify("；".join(msgs))
+        self._refresh_file_list()
+        # 第一个视频自动载入主画面，省得再点一次
+        if added and self.src is None:
+            self.load_file(self.preview_files[0])
+
+    def _refresh_file_list(self, *, selected: int | None = None) -> None:
+        """刷新合并列表。
+
+        勾选用「✓」前缀表示，取消勾选的行会从合并中排除。
+        """
+        if not hasattr(self, "lst_files"):
+            return
+        self.lst_files.delete(0, "end")
+        for i, f in enumerate(self.preview_files):
+            mark = "✓ " if self._file_enabled(i) else "　 "
+            self.lst_files.insert("end", f"{mark}{f.name}")
+        if selected is not None and 0 <= selected < len(self.preview_files):
+            self.lst_files.selection_set(selected)
+        if hasattr(self, "lbl_list_hint"):
+            total = len(self.preview_files)
+            on = sum(1 for i in range(total) if self._file_enabled(i))
+            self.lbl_list_hint.config(
+                text="把 .h264 文件拖到窗口即可加入" if total == 0
+                else f"共 {total} 个，将合并 {on} 个")
+
+    def _file_enabled(self, idx: int) -> bool:
+        """第 idx 个文件是否参与合并（默认都参与）。"""
+        disabled = getattr(self, "_files_disabled", None)
+        if not disabled:
+            return True
+        return idx not in disabled
+
+    def _on_file_item_toggle(self, _event=None) -> None:
+        """点击列表项 = 勾选/取消（取消的项不参与合并）。
+
+        用「点一下切换」而不是按住 Ctrl 多选：用户想表达的是
+        「这几段要、那几段不要」，逐项点击最直观。
+        """
+        sel = self.lst_files.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        disabled = getattr(self, "_files_disabled", None)
+        if disabled is None:
+            disabled = set()
+        if idx in disabled:
+            disabled.discard(idx)
+        else:
+            disabled.add(idx)
+        self._files_disabled = disabled
+        self._refresh_file_list(selected=idx)
+
+    def on_remove_file(self) -> None:
+        """从合并列表移除选中的文件。"""
+        sel = self.lst_files.curselection()
+        if not sel:
+            self._notify("请先在列表里选中要移除的文件")
+            return
+        idx = sel[0]
+        if not (0 <= idx < len(self.preview_files)):
+            return
+        removed = self.preview_files.pop(idx)
+        disabled = getattr(self, "_files_disabled", set())
+        # 索引整体前移一位，取消标记也要跟着挪
+        disabled.discard(idx)
+        self._files_disabled = {i - 1 if i > idx else i for i in disabled}
+        # 移除的正好是当前预览的文件 -> 换成剩余的第一个
+        if getattr(self, "src", None) == removed:
+            self.src = None
+            if self.preview_files:
+                self.load_file(self.preview_files[0])
+        self._refresh_file_list()
+        self._refresh_preview_bar()
+
+    def on_clear_files(self) -> None:
+        """清空合并列表。"""
+        if not self.preview_files:
+            return
+        self.preview_files.clear()
+        self._files_disabled = set()
+        self._refresh_file_list()
+        self._refresh_preview_bar()
+
+    def _merge_targets(self) -> list[Path]:
+        """参与合并的文件（已按列表顺序，跳过被取消的）。"""
+        return [f for i, f in enumerate(self.preview_files)
+                if self._file_enabled(i)]
 
     # ---------- 合并多个分段视频 ----------
     def _sync_merge_btn(self) -> None:
@@ -556,25 +667,29 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
                 state="normal" if self.ffmpeg and self.ffprobe else "disabled")
 
     def on_merge(self) -> None:
-        """把「添加预览」里已添加的视频按顺序拼成一个，并应用当前遮挡设置。
+        """把列表里已勾选的视频按顺序拼成一个，并应用当前遮挡设置。
 
         典型场景：行车记录仪按时间分段录制，同一起事故被切在两个文件里，
         合并后才能看清完整过程。
 
-        不再弹框重新选文件 —— 直接用预览列表（顺序即合并顺序），
-        避免重复选择时漏选、选错顺序。
+        视频靠拖放加入列表，顺序即合并顺序；在列表里点掉某一项
+        就把它排除在外，拖错了也能改。
         """
         if not self.ffmpeg:
             self._notify("ffmpeg 未就绪")
             return
 
-        files = list(getattr(self, "preview_files", []))
+        files = self._merge_targets()
         # 只合并还存在的文件
         files = [f for f in files if f.is_file()]
         if len(files) < 2:
+            skipped = len(getattr(self, "preview_files", [])) - len(
+                self._merge_targets())
+            extra = f"（已取消 {skipped} 个）" if skipped > 0 else ""
             self._notify(
-                f"当前只有 {len(files)} 个视频，无法合并。\n"
-                "请先点「添加预览」添加 2 个以上（可分多次添加）。")
+                f"当前只有 {len(files)} 个可合并视频{extra}，无法合并"
+                f"（至少需要 2 个）。\n"
+                "请把 2 个以上的视频文件拖到窗口里（可一次拖多个）。")
             return
 
         total_mb = sum(f.stat().st_size for f in files) / 1024 / 1024
@@ -899,19 +1014,22 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.canvas_box.set_drop_highlight(False)
 
     def on_drop(self, event) -> None:
-        """处理拖入的文件，取第一个受支持的视频。"""
+        """拖入的文件加入合并列表（按拖入顺序），首个自动载入主画面。"""
         self.canvas_box.set_drop_highlight(False)
         try:
             data = event.data
             paths = self.tk.splitlist(data) if isinstance(data, str) else list(data)
         except (tk.TclError, AttributeError, TypeError):
             return
+        videos: list[Path] = []
         for raw in paths:
             p = Path(str(raw).strip("{}"))
             if p.suffix.lower() in VIDEO_EXTS and p.is_file():
-                self.load_file(p)
-                return
-        self._notify("拖入的文件不是支持的视频格式")
+                videos.append(p)
+        if not videos:
+            self._notify("拖入的文件不是支持的视频格式")
+            return
+        self._add_files(videos)
 
     def _bind_player_keys(self) -> None:
         """键盘快捷键（全局绑定到窗口）。"""

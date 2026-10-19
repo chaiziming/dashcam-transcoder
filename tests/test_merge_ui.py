@@ -51,7 +51,8 @@ def main() -> int:
         app.on_merge()
         check("合并时不再弹文件选择框", not picker.called,
               "应直接使用已添加的预览列表")
-        check("提示去添加预览", any("添加预览" in n for n in notified),
+        check("提示去添加视频（拖放）",
+              any("拖到窗口" in n for n in notified),
               f"提示: {notified}")
 
     print("\n== 3. 只有 1 个视频时也应中止 ==")
@@ -140,17 +141,43 @@ def main() -> int:
         f.write_bytes(b"\x00" * 512)
         extra.append(f)
 
-    added = 0
-    for f in extra:
-        if f not in app.preview_files and len(app.preview_files) < app.MAX_PREVIEW:
-            app.preview_files.append(f)
-            added += 1
-    check("最多保留 MAX_PREVIEW 个",
-          len(app.preview_files) <= app.MAX_PREVIEW,
-          f"{len(app.preview_files)} 个 / 上限 {app.MAX_PREVIEW}")
+    # 现在列表不限量：拖几个就加几个。
+    # 这些是假文件（只有 512 字节），mock 掉载入避免真去解码。
+    n_before = len(app.preview_files)
+    with mock.patch.object(app, "load_file"):
+        app._add_files(list(extra))
+    check("拖入文件全部加入（不再有 4 个上限）",
+          len(app.preview_files) == n_before + len(extra),
+          f"{n_before} + {len(extra)} = {len(app.preview_files)}")
     check("重复文件不重复添加",
-          len(set(app.preview_files)) == len(app.preview_files),
-          "无重复")
+          len(set(app.preview_files)) == len(app.preview_files), "无重复")
+
+    print("\n== 8. 勾选/取消：被取消的项不参与合并 ==")
+    before = len(app._merge_targets())
+    check("全部勾选时合并目标数 = 文件数", before == len(app.preview_files),
+          f"{before} / {len(app.preview_files)}")
+    app.lst_files.selection_set(1)
+    app._on_file_item_toggle()
+    check("取消第 2 项后合并目标少1 个",
+          len(app._merge_targets()) == before - 1,
+          f"{len(app._merge_targets())} / {before}")
+    check("列表项前缀变为未勾选",
+          app.lst_files.get(1).startswith("\u3000"),
+          repr(app.lst_files.get(1)[:4]))
+    app.lst_files.selection_set(1)
+    app._on_file_item_toggle()
+    check("再次点击可恢复勾选", len(app._merge_targets()) == before,
+          f"{len(app._merge_targets())}")
+
+    print("\n== 9. 移除与清空 ==")
+    n0 = len(app.preview_files)
+    app.lst_files.selection_set(0)
+    app.on_remove_file()
+    check("移除选中项", len(app.preview_files) == n0 - 1,
+          f"{n0} -> {len(app.preview_files)}")
+    app.on_clear_files()
+    check("清空列表", len(app.preview_files) == 0, f"{len(app.preview_files)}")
+    check("清空后合并目标为空", len(app._merge_targets()) == 0)
 
     for f in [f1, f2] + extra:
         f.unlink(missing_ok=True)
