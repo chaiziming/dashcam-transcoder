@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -256,6 +257,58 @@ def ensure_env() -> None:
     print(f"[*] 环境已就绪：{venv}")
 
 
+def find_running_instances() -> list[tuple[int, str]]:
+    """查找正在运行的程序实例。
+
+    程序开着时会锁住 exe 与工作目录下的文件，后面复制阶段就会报
+    PermissionError(WinError 32)。与其失败在第 6 步，不如在这里提醒。
+
+    实现用 PowerShell 的 CIM 查询而不是 tasklist：
+      - tasklist 的IMAGENAME 过滤对中文长名不可靠，且输出是 GBK编码
+      - CIM 能直接拿到 ExecutablePath，精确判断是不是本项目的程序
+    """
+    if os.name != "nt" or not APP_NAME:
+        return []
+    # 只匹配项目目录下的程序，避免误报其他同名进程
+    script = (
+        "Get-CimInstance Win32_Process -Filter \"Name='"
+        + APP_NAME + ".exe'\" | "
+        "Select-Object ProcessId, ExecutablePath | ConvertTo-Json -Compress"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, encoding="utf-8", errors="replace", timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if not out.stdout or not out.stdout.strip():
+        return []
+    try:
+        data = json.loads(out.stdout)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        return []
+    root = str(ROOT).lower()
+    found: list[tuple[int, str]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("ExecutablePath") or "")
+        pid = item.get("ProcessId")
+        # 路径为空（权限不足）或不在项目目录内 => 忽略
+        if not path or root not in path.lower():
+            continue
+        try:
+            pid_int = int(pid)
+        except (TypeError, ValueError):
+            continue
+        found.append((pid_int, APP_NAME + ".exe"))
+    return found
+
+
 def check_env(*, skip_exe: bool) -> None:
     """构建前自检，把问题说清楚，别让用户对着闪退的窗口猜。"""
     print(f"    Python: {sys.version.split()[0]}  ({sys.executable})")
@@ -264,6 +317,15 @@ def check_env(*, skip_exe: bool) -> None:
     if "WindowsApps" in sys.executable:
         print("    [警告] 当前 Python 来自 WindowsApps，可能是微软商店的占位程序。")
         print("           建议改装 python.org 版本（勾选 Add to PATH）。")
+
+    # 程序在运行会锁文件，导致后面复制阶段失败
+    running = find_running_instances()
+    if running:
+        print(f"    [警告] 检测到 {APP_NAME}.exe 正在运行"
+              f"（PID: {', '.join(str(p) for p, _ in running)}）。")
+        print("           程序运行时会锁住文件，复制阶段可能失败。")
+        print("           建议先关闭程序再构建；直接继续也可，"
+              "构建脚本会自动重试被占用的文件。")
 
     missing: list[str] = []
     if not skip_exe:
@@ -400,17 +462,63 @@ def main() -> int:
     portable = outdir / f"dashcam-transcoder-{version}-portable"
     shutil.rmtree(portable, ignore_errors=True)
     portable.mkdir(parents=True, exist_ok=True)
+
+    def copy_robust(src, dst) -> bool:
+        """复制文件，遇占用则重试。
+
+        Windows 上目标文件可能正被杀毒软件或资源管理器预览进程打开，
+        直接 copy 会抛 PermissionError(WinError 32)。重试几次即可，
+        实在不行才报错，避免整个构建因偶发占用而中断。
+        """
+        for attempt in range(4):
+            try:
+                shutil.copy2(src, dst)
+                return True
+            except PermissionError:
+                if attempt == 3:
+                    return False
+                time.sleep(0.6 * (attempt + 1))
+        return False
+
+    def copy_dir_robust(src_dir: Path, dst_dir: Path) -> list[str]:
+        """复制整个目录，返回未能复制的文件列表。"""
+        missing: list[str] = []
+        for f in sorted(src_dir.rglob("*")):
+            rel = f.relative_to(src_dir)
+            target = dst_dir / rel
+            if f.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not copy_robust(f, target):
+                missing.append(str(rel))
+        return missing
+
+    problems: list[str] = []
     for item in (assets / f"{APP_NAME}.exe", assets / "ffmpeg"):
         if item.is_dir():
-            shutil.copytree(item, portable / item.name)
+            for name in copy_dir_robust(item, portable / item.name):
+                problems.append(f"{item.name}/{name}")
         elif item.is_file():
-            shutil.copy2(item, portable / item.name)
+            if not copy_robust(item, portable / item.name):
+                problems.append(item.name)
     readme = ROOT / "docs_使用说明.md"
-    if readme.is_file():
-        shutil.copy2(readme, portable / "使用说明.md")
+    if readme.is_file() and not copy_robust(readme, portable / "使用说明.md"):
+        problems.append("使用说明.md")
+
+    if problems:
+        # 不中断构建：明确列出问题，让用户决定是否重跑
+        print(f"    [警告] {len(problems)} 个文件被占用未复制：")
+        for name in problems[:8]:
+            print(f"      - {name}")
+        print("    通常是杀毒软件或资源管理器正在扫描目标目录，"
+              "关闭后重新构建即可。")
     print(f"    免安装版：{portable}")
 
     # ---- 6. 安装包 ----
+    # 记录本次真正产出的安装包路径；跳过或失败时保持 None，
+    # 结尾只报告实际产物，不把目录里遗留的旧文件当成新产物。
+    setup_exe: Path | None = None
     if args.skip_inno:
         print("\n[跳过] 编译安装包（--skip-inno）")
     else:
@@ -448,18 +556,22 @@ def main() -> int:
         setups = list(outdir.glob(f"dashcam-transcoder-{version}-setup.exe"))
         if not setups:
             raise SystemExit("编译成功但没找到 setup.exe")
-        print(f"    安装包：{setups[0].name}  "
-              f"{setups[0].stat().st_size / 1048576:.1f} MB")
+        setup_exe = setups[0]
+        print(f"    安装包：{setup_exe.name}  "
+              f"{setup_exe.stat().st_size / 1048576:.1f} MB")
 
     print("\n" + "=" * 62)
     print("构建完成")
     print("=" * 62)
-    for f in sorted(outdir.glob("*")):
-        if f.is_file() and f.suffix == ".exe":
-            print(f"  安装包    {f}")
-        elif f.is_dir():
-            print(f"  免安装版  {f.name}/")
-    print("\n安装包可以直接双击安装测试；免安装版解压即用。")
+    # 只列出本次真正产出的文件，避免把上一次遗留的旧安装包
+    # 也当成新产物报出来（--skip-inno 时尤其容易误导）。
+    print(f"  免安装版  {portable.name}/")
+    if setup_exe and setup_exe.is_file():
+        print(f"  安装包    {setup_exe}")
+        print("\n安装包可以直接双击安装测试；免安装版解压即用。")
+    else:
+        print("\n本次未生成安装包（如需安装包，去掉 --skip-inno 重新构建）。")
+        print("免安装版解压即用。")
     return 0
 
 
