@@ -74,8 +74,7 @@ def main() -> int:
     f2.write_bytes(b"\x00" * 1024)
     app.preview_files = [f1, f2]
 
-    # 重复添加应被去重、上限应生效
-    app.MAX_PREVIEW = 4
+    # 重复添加应被去重
     app.preview_files = [f1, f2]
     check("预览列表保留添加顺序",
           [p.name for p in app.preview_files] == ["seg1.h264", "seg2.h264"],
@@ -134,23 +133,32 @@ def main() -> int:
         check("命令含 concat", "concat" in " ".join(ran["cmd"]))
 
     print("\n== 5. 上限与去重 ==")
-    app.MAX_PREVIEW = 4
     extra = []
     for i in range(6):
         f = tmp / f"extra{i}.h264"
         f.write_bytes(b"\x00" * 512)
         extra.append(f)
 
-    # 现在列表不限量：拖几个就加几个。
+    # 最多合并 4 个：拖入更多应被截断。
     # 这些是假文件（只有 512 字节），mock 掉载入避免真去解码。
     n_before = len(app.preview_files)
     with mock.patch.object(app, "load_file"):
         app._add_files(list(extra))
-    check("拖入文件全部加入（不再有 4 个上限）",
-          len(app.preview_files) == n_before + len(extra),
-          f"{n_before} + {len(extra)} = {len(app.preview_files)}")
+    check(f"最多保留 {app.MAX_MERGE} 个视频",
+          len(app.preview_files) == app.MAX_MERGE,
+          f"加入 {n_before}+{len(extra)} 后= {len(app.preview_files)}")
     check("重复文件不重复添加",
           len(set(app.preview_files)) == len(app.preview_files), "无重复")
+
+    print("\n== 7b. 超出上限会提示 ==")
+    notified2 = []
+    with mock.patch.object(app, "load_file"), \
+            mock.patch.object(app, "_notify", side_effect=notified2.append):
+        app._add_files([tmp / "over.h264"])
+    check("已达上限时提示超出",
+          any("超出上限" in n for n in notified2), f"提示: {notified2}")
+    check("数量不再增长", len(app.preview_files) == app.MAX_MERGE,
+          f"{len(app.preview_files)}")
 
     print("\n== 8. 勾选/取消：被取消的项不参与合并 ==")
     before = len(app._merge_targets())

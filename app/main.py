@@ -50,6 +50,10 @@ VIDEO_EXTS = (".h264", ".265", ".hevc", ".avc", ".mp4", ".m4v", ".avi", ".mov", 
 
 
 class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
+    # 待合并视频的上限：行车记录仪分段录制通常 2~4 段，
+    # 更多的话逐段核对列表会变得很费劲，所以卡在 4 个。
+    MAX_MERGE = 4
+
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_TITLE)
@@ -170,10 +174,10 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         top = ttk.Frame(card, style="Card.TFrame")
         top.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         top.columnconfigure(1, weight=1)
-        # 不用弹框选文件了：点一下就在画面上直接开一个可拖拽的遮挡区，
-        # 省掉「先选文件再框选」的两步操作。
-        self.btn_choose = ttk.Button(top, text="添加区域",
-                                     command=self.on_add_region)
+        # 选视频加进待合并列表；也可以直接拖文件进来。
+        # 上限 4 个：行车记录仪分段录制通常 2~4 段，太多不便于逐段确认。
+        self.btn_choose = ttk.Button(top, text="添加视频",
+                                     command=self.on_add_video)
         self.btn_choose.grid(row=0, column=0, sticky="w")
 
         # 合并多个分段视频（行车记录仪按时间分段录制，同一起事故常分散在两个文件里）
@@ -181,8 +185,7 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.btn_merge.grid(row=0, column=2, sticky="e")
         self._sync_merge_btn()
 
-        # 已添加的预览文件列表（合并顺序 = 拖入顺序）。
-        # 只由拖放添加，所以没有数量上限：拖几个就合几个。
+        # 已添加的待合并视频（合并顺序 = 添加顺序），最多 MAX_MERGE 个。
         self.preview_files: list[Path] = []
 
         # 原来的「换帧预览」按钮已移除：进度条拖拽 + 快进快退已能覆盖同样的需求，
@@ -222,18 +225,19 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.lbl_info.grid(row=r, column=0, sticky="w", pady=(0, 10))
         r += 1
 
-        # --- 合并列表（拖入的视频，按拖入顺序合并）---
-        ttk.Label(side, text="合并列表（拖入视频，按拖入顺序合并）",
+        # --- 待合并视频（最多 4 个，按列表顺序合成）---
+        ttk.Label(side, text=f"待合并视频（最多 {self.MAX_MERGE} 个，按顺序拼接）",
                   style="Section.TLabel").grid(row=r, column=0, sticky="w",
                                                 pady=(0, 4))
         r += 1
         self.lbl_list_hint = ttk.Label(
-            side, text="把 .h264 文件拖到窗口即可加入", style="Muted.TLabel")
+            side, text="点「添加视频」或直接拖文件进来",
+            style="Muted.TLabel")
         self.lbl_list_hint.grid(row=r, column=0, sticky="w", pady=(0, 4))
         r += 1
 
         self.lst_files = tk.Listbox(
-            side, height=5, font=("Consolas", 9), activestyle="none",
+            side, height=4, font=("Consolas", 9), activestyle="none",
             highlightthickness=1, highlightbackground=BORDER, borderwidth=0,
             selectbackground="#dce8fb", selectforeground=FG)
         self.lst_files.grid(row=r, column=0, sticky="ew", pady=(2, 4))
@@ -508,33 +512,59 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
             self.lbl_done.config(text="")
             self.lbl_done.grid_remove()
 
-    def on_add_region(self) -> None:
-        """在画面中央新建一个可拖拽的遮挡区（上限 4 个）。
+    def on_add_video(self) -> None:
+        """选视频加入合并列表（最多 MAX_MERGE 个，按添加顺序合成）。
 
-        原来是弹框选视频文件；现在视频靠拖放加入合并列表，
-        这个按钮专管「加一个遮挡框」，少一步操作。
+        也可以直接把文件拖进窗口，那边的上限与这里一致。
         """
-        MAX_REGIONS = 4
-        regions = self.canvas_box.regions
-        if len(regions) >= MAX_REGIONS:
-            self._notify(f"最多 {MAX_REGIONS} 个自定义区域，先删除一个再添加")
+        MAX_VIDEOS = self.MAX_MERGE
+        room = MAX_VIDEOS - len(self.preview_files)
+        if room <= 0:
+            self._notify(f"最多合并 {MAX_VIDEOS} 个视频，请先移除一个再添加")
             return
 
-        # 需要真实分辨率才能换算坐标；没有视频时按 1920x1080 先摆着
-        vw = self.canvas_box.video_w or REF_W
-        vh = self.canvas_box.video_h or REF_H
-        w = max(80, vw // 5)
-        h = max(48, vh // 8)
-        # 依次错开一点，避免每次都叠在正中间看不清是新加的还是旧的
-        n = len(regions)
-        x = (vw - w) // 2 + (n % 3) * 18
-        y = (vh - h) // 2 + (n % 3) * 18
+        start_dir = self.cfg.get("last_dir") or str(Path.home())
+        paths = filedialog.askopenfilenames(
+            title=f"选择要合并的视频（还可添加 {room} 个）",
+            initialdir=start_dir,
+            filetypes=[("视频文件", " ".join(f"*{e}" for e in VIDEO_EXTS)),
+                       ("h264 裸流", "*.h264"), ("所有文件", "*.*")])
+        if not paths:
+            return
+        # 选超额了只取前 room 个，并提示丢了几个
+        self._add_files([Path(p) for p in paths][:room], limit=MAX_VIDEOS)
 
-        regions.append(MaskRegion(x=max(0, x), y=max(0, y), w=w, h=h,
-                                  label="自定义"))
-        self.canvas_box._redraw()
-        self.on_regions_changed()
-        self._notify("已添加区域：拖动可移动，右键点击可删除")
+    def _add_files(self, paths: list[Path], *, limit: int | None = None) -> None:
+        """把视频加入合并列表（去重、按上限截断），并刷新列表显示。"""
+        if limit is None:
+            limit = self.MAX_MERGE
+        added = 0
+        dup = 0
+        full = 0
+        room = limit - len(self.preview_files)
+        for p in paths:
+            if p in self.preview_files:
+                dup += 1
+                continue
+            if room <= 0:
+                full += 1
+                continue
+            self.preview_files.append(p)
+            added += 1
+            room -= 1
+        msgs = []
+        if added:
+            msgs.append(f"已加入 {added} 个")
+        if dup:
+            msgs.append(f"{dup} 个重复已跳过")
+        if full:
+            msgs.append(f"{full} 个超出上限（最多 {limit} 个）")
+        if msgs:
+            self._notify("；".join(msgs))
+        self._refresh_file_list()
+        # 第一个视频自动载入主画面，省得再点一次
+        if added and self.src is None:
+            self.load_file(self.preview_files[0])
 
     def _refresh_preview_bar(self) -> None:
         """更新顶部的预览列表提示条。"""
@@ -554,28 +584,6 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
 
     # ---------- 合并列表（拖放加入，可取消）----------
 
-    def _add_files(self, paths: list[Path]) -> None:
-        """把视频加入合并列表（去重、不限量），并刷新列表显示。"""
-        added = 0
-        dup = 0
-        for p in paths:
-            if p in self.preview_files:
-                dup += 1
-                continue
-            self.preview_files.append(p)
-            added += 1
-        msgs = []
-        if added:
-            msgs.append(f"已加入 {added} 个")
-        if dup:
-            msgs.append(f"{dup} 个重复已跳过")
-        if msgs:
-            self._notify("；".join(msgs))
-        self._refresh_file_list()
-        # 第一个视频自动载入主画面，省得再点一次
-        if added and self.src is None:
-            self.load_file(self.preview_files[0])
-
     def _refresh_file_list(self, *, selected: int | None = None) -> None:
         """刷新合并列表。
 
@@ -593,8 +601,9 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
             total = len(self.preview_files)
             on = sum(1 for i in range(total) if self._file_enabled(i))
             self.lbl_list_hint.config(
-                text="把 .h264 文件拖到窗口即可加入" if total == 0
-                else f"共 {total} 个，将合并 {on} 个")
+                text=f"点「添加视频」或拖文件进来（上限 {self.MAX_MERGE} 个）"
+                if total == 0
+                else f"共 {total}/{self.MAX_MERGE} 个，将按顺序合并 {on} 个")
 
     def _file_enabled(self, idx: int) -> bool:
         """第 idx 个文件是否参与合并（默认都参与）。"""
@@ -689,7 +698,7 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
             self._notify(
                 f"当前只有 {len(files)} 个可合并视频{extra}，无法合并"
                 f"（至少需要 2 个）。\n"
-                "请把 2 个以上的视频文件拖到窗口里（可一次拖多个）。")
+                "请点「添加视频」选 2 个以上（也可直接把文件拖到窗口）。")
             return
 
         total_mb = sum(f.stat().st_size for f in files) / 1024 / 1024
