@@ -53,6 +53,29 @@ def main() -> int:
     check("输入区域宽度合理（80~130px）",
           80 <= entry_w <= 130, f"{entry_w}px")
 
+    print("\n== 1b. Entry 与边框不重叠（防回归）==")
+    from app.time_input import BORDER_W
+    root.update()
+    cw = ti.canvas.winfo_width()
+    ch = ti.canvas.winfo_height()
+    cx, cy = ti.canvas.coords(ti.win)
+    ew, eh = ti.entry.winfo_width(), ti.entry.winfo_height()
+    left, right = cx - ew / 2, cx + ew / 2
+    top, bottom = cy - eh / 2, cy + eh / 2
+    check("Entry 左边缘在边框内侧",
+          left >= BORDER_W, f"left={left:.0f} >= {BORDER_W}")
+    check("Entry 右边缘在边框内侧",
+          right <= cw - BORDER_W, f"right={right:.0f} <= {cw - BORDER_W}")
+    check("Entry 上边缘在边框内侧",
+          top >= BORDER_W, f"top={top:.0f}")
+    check("Entry 下边缘在边框内侧",
+          bottom <= ch - BORDER_W, f"bottom={bottom:.0f} <= {ch - BORDER_W}")
+    check("Entry 水平居中", abs(cx - cw / 2) < 1, f"cx={cx} vs {cw / 2}")
+    bb = ti.canvas.bbox(ti.canvas.find_withtag("border")[0])
+    check("边框 bbox 落在画布内（不外溢）",
+          bb[0] >= 0 and bb[1] >= 0 and bb[2] <= cw and bb[3] <= ch,
+          f"bbox={bb} canvas={cw}x{ch}")
+
     print("\n== 2. 禁止输入非数字字符 ==")
     for ch, name in (("a", "字母"), (" ", "空格"), ("/", "斜杠"),
                      ("-", "减号"), (".", "点号"), ("@", "符号")):

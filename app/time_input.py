@@ -23,6 +23,9 @@ BORDER = "#c8ccd4"
 BORDER_FOCUS = ACCENT
 FG = "#1f2933"
 
+# 边框线宽（像素）。Entry 必须内缩这么多，否则会被描边压住。
+BORDER_W = 2
+
 # 单段最大值（含）：时最大 99，分/秒最大 59
 MAX = (99, 59, 59)
 # 三段的字符区间：[起, 止) —— 用于把光标位置映射到段
@@ -71,33 +74,41 @@ class TimeInput(tk.Frame):
 
     # ---------- 绘制 ----------
     def _layout(self, _e=None) -> None:
+        """Entry 尺寸与定位：严格内缩在边框线以内。
+
+        Canvas 的描边是以坐标为中心向外延伸的：画 create_rectangle(1,1,w-2,h-2)
+        配 width=2，实际线宽覆盖 x=0..w-1。所以 Entry 要放在
+        [BORDER, w-BORDER] 这个区间内，两侧各留出 BORDER 像素。
+        """
         w = max(1, self.canvas.winfo_width())
         h = max(1, self.canvas.winfo_height())
-        # Entry 宽度跟随 Canvas，但不超过设定值（防止被拉得过宽）
-        ew = min(self._width - 2, max(60, w - 2))
-        self.canvas.itemconfigure(self.win, width=ew, height=h - 2)
-        self.canvas.coords(self.win, max(1, (w - ew) // 2), h // 2)
+        ew = max(20, min(self._width - BORDER_W * 2, w - BORDER_W * 2))
+        eh = max(10, h - BORDER_W * 2)
+        self.canvas.itemconfigure(self.win, width=ew, height=eh)
+        self.canvas.coords(self.win, w // 2, h // 2)
         self._draw()
 
     def _draw(self) -> None:
-        """聚焦时画白底（输入框区域），非聚焦时与背景融为一体。
+        """画边框线。
 
-        注意：只删带border 标签的元素，**绝不能用 delete("all")** ——
-        那会把 create_window 嵌入的 Entry 窗口一起删掉，
-        表现为 Entry 尺寸变成 1x1、整框看不见内容。
+        两个要点：
+        1. 只删带 border 标签的元素。**绝不能用 delete("all")** ——
+           那会把 create_window 嵌入的 Entry 窗口一起删掉，
+           表现为 Entry 尺寸变成 1x1、整框看不见内容。
+        2. 只描边、不填充（fill=""）。填充会盖住 Entry，
+           而 Entry 的背景是半透明的，边框线会从文字中间穿过。
         """
         self.canvas.delete("border")
         w = max(1, self.canvas.winfo_width())
         h = max(1, self.canvas.winfo_height())
         if self._focus:
-            self.canvas.create_rectangle(1, 1, w - 2, h - 2, fill="#ffffff",
-                                         outline=BORDER_FOCUS, width=2,
-                                         tags="border")
+            self.canvas.create_rectangle(
+                BORDER_W / 2, BORDER_W / 2, w - BORDER_W / 2, h - BORDER_W / 2,
+                outline=BORDER_FOCUS, width=BORDER_W, fill="", tags="border")
         else:
-            self.canvas.create_rectangle(0, 0, w, h, fill=BORDER, outline="",
-                                         tags="border")
-        # 边框画在 Entry 之下，避免遮住文字
-        self.canvas.tag_lower("border")
+            self.canvas.create_rectangle(
+                BORDER_W / 2, BORDER_W / 2, w - BORDER_W / 2, h - BORDER_W / 2,
+                outline=BORDER, width=BORDER_W, fill="", tags="border")
 
     # ---------- 焦点 ----------
     def _on_focus_in(self, _e=None) -> None:
