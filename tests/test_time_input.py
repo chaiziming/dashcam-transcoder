@@ -77,11 +77,13 @@ def main() -> int:
 
     print("\n== 3. 覆盖已有值，不产生多余位数 ==")
     ve.set("12:34:56")
-    tin_e._goto(0)
+    tin_e._goto(1)                # 时组（已有值 -> 编辑位落在第二位）
+    check("定位到时组第二位", tin_e._pos == 1, f"_pos={tin_e._pos}")
     key(tin_e, "0")
+    check("覆盖时组第二位 -> 10:34:56", ve.get() == "10:34:56", ve.get())
+    check("填满后前进到分组首位", tin_e._pos == 3, f"_pos={tin_e._pos}")
     key(tin_e, "0")
-    check("12:34:56 的时位被 00 覆盖 -> 00:34:56", ve.get() == "00:34:56",
-          ve.get())
+    check("覆盖分组第二位 -> 10:04:56", ve.get() == "10:04:56", ve.get())
     check("文本长度始终为 8", len(ve.get()) == 8, f"len={len(ve.get())}")
 
     print("\n== 4. 连续输入 6 位应正好填满 ==")
@@ -112,13 +114,13 @@ def main() -> int:
     check("多字符按键被拦截", key(tin_e, "12") == "break")
     check("值始终未变", ve.get() == "00:00:00", ve.get())
 
-    print("\n== 7. 点击定位到对应位 ==")
+    print("\n== 7. 点击定位到对应组（组内两位一体）==")
     ve.set("00:00:00")
-    for x, expect, name in ((0, 0, "最左=时首"), (1, 1, "时末"),
-                             (3, 3, "分首"), (4, 4, "分末"),
-                             (6, 6, "秒首"), (7, 7, "秒末")):
+    for x, expect, name in ((0, 0, "时首"), (1, 0, "时末"),
+                            (3, 3, "分首"), (4, 3, "分末"),
+                            (6, 6, "秒首"), (7, 6, "秒末")):
         tin_e._goto(x)
-        check(f"定位 {x} -> {name}（_pos={expect}）",
+        check(f"定位 {x} -> {name}（组首 _pos={expect}）",
               tin_e._pos == expect, f"_pos={tin_e._pos}")
 
     print("\n== 8. 段内前进逻辑（一位一位填）==")
@@ -170,62 +172,90 @@ def main() -> int:
           all(c.isdigit() for c in ve.get()[:2] + ve.get()[3:5] + ve.get()[6:]),
           ve.get())
 
-    print("\n== 11. Backspace：当前位归零并逐位回退 ==")
+    print("\n== 11. Backspace：逐位归零并回退 ==")
     ve.set("12:34:56")
-    tin_e._goto(7)                       # 秒位末
+    tin_e._goto(7)# 秒组（已有值 -> 编辑位落在第二位）
+    check("定位到秒组第二位（_pos=7）", tin_e._pos == 7, f"_pos={tin_e._pos}")
     tin_e._on_backspace()
-    check("秒位末归零 -> 12:34:50", ve.get() == "12:34:50", ve.get())
-    check("回退到秒位首（_pos=6）", tin_e._pos == 6, f"_pos={tin_e._pos}")
+    check("秒组第二位归零 -> 12:34:50", ve.get() == "12:34:50", ve.get())
+    check("退到秒组第一位（_pos=6）", tin_e._pos == 6, f"_pos={tin_e._pos}")
     tin_e._on_backspace()
-    check("秒位首归零 -> 12:34:00", ve.get() == "12:34:00", ve.get())
-    check("回退到分位末（_pos=4）", tin_e._pos == 4, f"_pos={tin_e._pos}")
+    check("秒组第一位归零 -> 12:34:00", ve.get() == "12:34:00", ve.get())
+    check("退到分组第二位（_pos=4）", tin_e._pos == 4, f"_pos={tin_e._pos}")
     tin_e._on_backspace()
-    check("分位末归零 -> 12:30:00", ve.get() == "12:30:00", ve.get())
-    check("回退到分位首（_pos=3）", tin_e._pos == 3, f"_pos={tin_e._pos}")
-    for _ in range(6):
-        tin_e._on_backspace()
-    check("一路回退并逐位清零 -> 00:00:00", ve.get() == "00:00:00", ve.get())
-    check("在最前一位时不再回退（_pos=0）", tin_e._pos == 0, f"_pos={tin_e._pos}")
+    check("分组第二位归零 -> 12:30:00", ve.get() == "12:30:00", ve.get())
+    check("退到分组第一位（_pos=3）", tin_e._pos == 3, f"_pos={tin_e._pos}")
+    tin_e._on_backspace()
+    check("分组第一位归零 -> 12:00:00", ve.get() == "12:00:00", ve.get())
+    check("退到时组第二位（_pos=1）", tin_e._pos == 1, f"_pos={tin_e._pos}")
+    tin_e._on_backspace()
+    check("时组第二位归零 -> 10:00:00", ve.get() == "10:00:00", ve.get())
+    check("退到时组第一位（_pos=0）", tin_e._pos == 0, f"_pos={tin_e._pos}")
+    tin_e._on_backspace()
+    check("时组第一位归零 -> 00:00:00", ve.get() == "00:00:00", ve.get())
+    check("已在第一位，不再回退（_pos=0）", tin_e._pos == 0, f"_pos={tin_e._pos}")
     tin_e._on_backspace()
     check("最前位再按仍是 00:00:00", ve.get() == "00:00:00", ve.get())
 
-    print("\n== 12. 选中位是单个数字的轻量背景块 ==")
-    from app.time_input import SEL_BG
+    # 空组定位到组首
+    ve.set("00:00:00")
+    tin_e._goto(6)
+    check("空组定位到组首（_pos=6）", tin_e._pos == 6, f"_pos={tin_e._pos}")
 
-    def sel_box() -> tuple | None:
+    print("\n== 12. 选中高亮覆盖整组两位数字 ==")
+    from app.time_input import SEL_BG, SEL_EDGE, SEL_FG, BORDER_W as _BW
+
+    def sel_box():
         tin_e._focus = True
         tin_e._render()
         root.update()
         for i in tin_e.canvas.find_all():
             if tin_e.canvas.type(i) == "rectangle" \
                     and tin_e.canvas.itemcget(i, "fill") == SEL_BG:
-                return tin_e.canvas.bbox(i)
-        return None
+                return i, tin_e.canvas.bbox(i)
+        return None, None
 
-    check("绘制了选中位背景块", sel_box() is not None)
-    # 单个字符宽度约 1/8 控件宽，块宽应接近它（而不是两倍）
+    check("绘制了选中组背景块", sel_box()[0] is not None)
     ctrl_w = tin_e.canvas.winfo_width()
-    from app.time_input import BORDER_W as _BW
     one_char = (ctrl_w - (_BW + 5) * 2) / 8.0
-    box = sel_box()
+    item, box = sel_box()
     box_w = box[2] - box[0]
-    check("选中块宽度约等于一个字符宽（单选，非整段）",
-          box_w <= one_char * 1.5, f"块宽 {box_w:.0f} vs 字符宽 {one_char:.0f}")
-    check("选中块未描边（视觉克制）",
-          str(tin_e.canvas.itemcget(
-              [i for i in tin_e.canvas.find_all()
-               if tin_e.canvas.type(i) == "rectangle"
-               and tin_e.canvas.itemcget(i, "fill") == SEL_BG][0],
-              "outline")) == "",
-          "outline 应为空")
+    check("选中块覆盖整组（宽度 ≈ 2 个字符）",
+          one_char * 1.5 < box_w < one_char * 2.5,
+          f"块宽 {box_w:.0f} vs 单字符 {one_char:.0f}")
+    check("选中块有描边（视觉明显）",
+          str(tin_e.canvas.itemcget(item, "outline")) != "",
+          f"outline={tin_e.canvas.itemcget(item, 'outline')}")
+    check("描边宽度 >= 2px",
+          int(float(tin_e.canvas.itemcget(item, "width"))) >= 2,
+          tin_e.canvas.itemcget(item, "width"))
+    check("选中底色为深蓝（非淡色）",
+          SEL_BG.lower() in ("#2f6feb", "#1d4ed8"), SEL_BG)
 
+    # 组内文字应转白
+    tin_e._goto(3)
+    tin_e._focus = True
+    tin_e._render()
+    root.update()
+    whites = [i for i in tin_e.canvas.find_all()
+              if tin_e.canvas.type(i) == "text"
+              and tin_e.canvas.itemcget(i, "fill") == SEL_FG]
+    check("选中组内文字转白（对比清晰）", len(whites) == 2, f"{len(whites)} 个")
+
+    # 三组的高亮块位置互不相同
     xs = []
-    for pos in (0, 1, 3, 4, 6, 7):
+    for pos in (0, 3, 6):
         tin_e._goto(pos)
-        b = sel_box()
+        _, b = sel_box()
         xs.append(b[0])
-    check("6 个数字位的高亮位置互不相同", len(set(xs)) == 6, f"x={xs}")
-    check("高亮从左到右严格递增", xs == sorted(xs), f"x={xs}")
+    check("时/分/秒三组高亮位置各不相同", len(set(xs)) == 3, f"x={xs}")
+    check("高亮从左到右递增", xs[0] < xs[1] < xs[2], f"x={xs}")
+
+    # 组内两点定位到同一组
+    tin_e._goto(0)
+    p0 = tin_e._pos
+    tin_e._goto(1)
+    check("组内两位定位到同一组", tin_e._pos == p0, f"{p0} vs {tin_e._pos}")
 
     tin_e._focus = False
     tin_e._render()
@@ -235,6 +265,23 @@ def main() -> int:
                          for i in tin_e.canvas.find_all()
                          if tin_e.canvas.type(i) == "rectangle"],
           "失焦应无高亮")
+
+    print("\n== 12a. 左右键跨框移动 ==")
+    vs.set("00:00:00")
+    ve.set("00:00:00")
+    tin_s._goto(0)
+    tin_s._focus = True
+    for _ in range(2):
+        tin_s._move_seg(1)
+    check("开始框内右键两次 -> 秒组", tin_s._seg == 2, f"seg={tin_s._seg}")
+    tin_s._move_seg(1)
+    check("在最后一组按右键 -> 跳到结束框", tin_e._focus is True,
+          f"tin_e._focus={tin_e._focus}")
+    check("结束框停在第一组（时）", tin_e._seg == 0, f"seg={tin_e._seg}")
+    tin_e._move_seg(-1)
+    check("结束框在第一组按左键 -> 退回开始框", tin_s._focus is True,
+          f"tin_s._focus={tin_s._focus}")
+    check("开始框停在最后一组（秒）", tin_s._seg == 2, f"seg={tin_s._seg}")
 
     print("\n== 12b. 跨框连续输入 ==")
     vs.set("00:00:00")

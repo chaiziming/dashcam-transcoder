@@ -1,15 +1,18 @@
 """紧凑的时间输入控件：显示 HH:MM:SS，用 ↑↓ 与数字键编辑。
 
 交互设计：
-- **选中的是单个数字位**。高亮只用一块淡蓝背景表示，不描边、
-  不加上下指示条、不给文字换重色 —— 够用且不抢眼。
-- 输入数字时依次覆盖光标所在位，写满两位后自动前进到下一段。
-- 支持**跨框连续输入**：开始框的「秒」段填满后自动跳到结束框的「时」段，
+- **选中的是一整组两位数字**（时 / 分 / 秒各一组）。高亮用深蓝底 + 白字 +
+  描边，一眼可见选了哪一组 —— 与 ↑↓ 的调整粒度保持一致：
+  高亮「03」时按 ↑ 调整的是 03 整体，而不是其中某个数字。
+- 输入数字时依次覆盖组内两位，写满后自动前进到下一组。
+- **左右键可跨框移动**：在最后一组按 → 跳到下一个框的第一组；
+  在第一组按 ← 退回上一个框的最后一组。
+- 支持**跨框连续输入**：开始框的「秒」组填满后自动跳到结束框的「时」组，
   结束框填完最后一位停在原地。两个框在操作手感上像一体，
   但它们是两个独立控件（各管自己的 var）。
-- Backspace 与上述流程相反：把当前位清零并退回上一位；
+- Backspace 与正向输入对称：把当前位清零并退回上一位；
   在开始框最前面按 Backspace 会退到结束框的最后一位。
-- ↑↓ 对当前位所属的段做 +1 / -1（时 0~99，分秒 0~59），循环取值，不会为负。
+- ↑↓ 对当前组做 +1 / -1（时 0~99，分秒 0~59），循环取值，不会为负。
 - 文本恒为 8 字符 `HH:MM:SS`，冒号不可编辑，只有数字位可改。
 
 渲染：全部画在 Canvas 上。不用 tk.Entry 的原因是它文字居中且不可控，
@@ -27,7 +30,9 @@ BORDER = "#c8ccd4"
 BORDER_FOCUS = ACCENT
 FG = "#1f2933"
 FG_DIM = "#8b95a3"          # 冒号颜色，比数字浅
-SEL_BG = "#cfe0fb"          # 选中数字位的背景块
+SEL_BG = "#2f6feb"# 选中组：深蓝底
+SEL_EDGE = "#1d4ed8"        # 选中组描边
+SEL_FG = "#ffffff"          # 选中组内文字转白，确保对比清晰
 
 BORDER_W = 2
 # 控件尺寸
@@ -121,24 +126,22 @@ class TimeInput(tk.Frame):
         cy = h // 2
         seg_start, seg_end = SEG_SPAN[self._seg]
 
-        # 选中段用背景块表示（不描粗、不换重色），视觉克制
+        # 选中范围是**一整组两位数字**（如「03」），而不是单个字符。
+        # 高亮必须一眼可见：深蓝底 + 白字 + 描边，三重区分。
         if self._focus:
-            # 当前数字位下标（由 _seg 与 _digit 组合得出）
-            cur = SEG_SPAN[self._seg][0] + self._digit
-            # 单个数字位的轻量选中：只加一个淡蓝背景块，不描边、
-            # 不加上下指示条、文字保持原色 —— 视觉克制但仍能看出选了哪一位。
-            x0 = pad + char_w * cur
-            x1 = pad + char_w * (cur + 1)
-            c.create_rectangle(x0 + 1, pad + 3, x1 - 1, h - pad - 3,
-                               fill=SEL_BG, outline="")
+            x0 = pad + char_w * seg_start
+            x1 = pad + char_w * seg_end
+            c.create_rectangle(x0 + 1, pad + 2, x1 - 1, h - pad - 2,
+                               fill=SEL_BG, outline=SEL_EDGE, width=2)
 
         for i, chx in enumerate(text):
+            in_sel = self._focus and seg_start <= i < seg_end
             if chx == ":":
                 c.create_text(pad + char_w * (i + 0.5), cy, text=":",
                               fill=FG_DIM, font=FONT)
             else:
                 c.create_text(pad + char_w * (i + 0.5), cy, text=chx,
-                              fill=FG, font=FONT)
+                              fill=SEL_FG if in_sel else FG, font=FONT)
 
     # ---------- 焦点 ----------
     def _on_focus_in(self, _e=None) -> None:
@@ -169,10 +172,23 @@ class TimeInput(tk.Frame):
         return "break"
 
     def _move_seg(self, step: int) -> str:
-        """左右键在段之间移动。"""
-        self._seg = max(0, min(2, self._seg + step))
-        self._digit = 0
-        self._render()
+        """左右键在段之间移动，到边界时跨到相邻的时间框。
+
+        在最后一组按→ 跳到下一个框的第一组；在第一组按 ← 退回上一个框的最后一组。
+        这样「开始 00:00:00 - 00:00:00 结束」在操作上连成一条线。
+        """
+        target = self._seg + step
+        if 0 <= target <= 2:
+            self._seg = target
+            self._digit = 0
+            self._render()
+            return "break"
+
+        # 越界 -> 跨框
+        if step > 0 and self.next_link is not None:
+            self.next_link._jump_seg(0)
+        elif step < 0 and self.prev_input is not None:
+            self.prev_input._jump_seg(2)
         return "break"
 
     # ---------- 兼容访问 ----------
@@ -182,16 +198,21 @@ class TimeInput(tk.Frame):
         return SEG_SPAN[self._seg][0] + self._digit
 
     def _goto(self, idx: int) -> None:
-        """把光标定位到指定字符下标；点在冒号上则归到左侧那一位。"""
+        """把光标定位到指定字符所属的组（时/分/秒）。
+
+        组内两位是一体的，所以点击组内任一位都选中整组 ——
+        这与 ↑↓ 的调整粒度保持一致：用户看到高亮「03」，
+        按 ↑ 时调整的也是 03，而不是其中某个数字。
+
+        该组已有值时把编辑位落到组内第二位：这样 Backspace 能逐位
+        往回退掉整组。否则永远只能退到组首，组内后一位清不掉。
+        """
         if idx >= 8:
             idx = 7
-        if idx <= 1:
-            self._seg, self._digit = 0, idx
-        elif idx <= 4:
-            self._seg, self._digit = 1, idx - 3
-        else:
-            self._seg, self._digit = 2, idx - 6
-        self._digit = max(0, min(1, self._digit))
+        self._seg = 0 if idx < 3 else (1 if idx < 6 else 2)
+        a, b = SEG_SLOTS[self._seg]
+        digits = self._digits()
+        self._digit = 1 if (digits[a] != "0" or digits[b] != "0") else 0
         self._render()
 
     # ---------- 输入 ----------
@@ -250,6 +271,8 @@ class TimeInput(tk.Frame):
             self._digit = (cur - 1) % 2
             self._render()
         else:
+            # 已在第一位：退到上一个框的最后一位；
+            # 没有上一个框就停在原地（当前位已在上方清零）
             prev = self.prev_input
             if prev is not None:
                 prev._jump_back()
@@ -261,9 +284,13 @@ class TimeInput(tk.Frame):
 
     def _jump_in(self) -> None:
         """被上一个框调用：接收焦点并停在「时」段，等待输入。"""
+        self._jump_seg(0)
+
+    def _jump_seg(self, seg: int) -> None:
+        """被相邻框调用：接收焦点并停在指定段。"""
         self._focus = True
         self.canvas.focus_set()
-        self._seg = 0
+        self._seg = seg
         self._digit = 0
         self._render()
 
