@@ -139,26 +139,39 @@ def main() -> int:
         f.write_bytes(b"\x00" * 512)
         extra.append(f)
 
-    # 最多合并 4 个：拖入更多应被截断。
+    # 现在走槽位卡：点「添加视频」开空位，拖文件填进去。
     # 这些是假文件（只有 512 字节），mock 掉载入避免真去解码。
-    n_before = len(app.preview_files)
+    notified1 = []
+    with mock.patch.object(app, "load_file"), \
+            mock.patch.object(app, "_notify", side_effect=notified1.append):
+        for _ in range(len(extra) + 2):
+            app.on_add_video()
+    check(f"槽位最多 {app.MAX_MERGE} 个",
+          len(app.canvas_box.slots) == app.MAX_MERGE,
+          f"{len(app.canvas_box.slots)} 个")
+    check("超限时提示",
+          any("最多" in n for n in notified1), f"提示: {notified1}")
+
+    # 填满槽位
     with mock.patch.object(app, "load_file"):
-        app._add_files(list(extra))
+        for slot, f in zip(app.canvas_box.slots, extra):
+            app.canvas_box.fill_slot(slot, f)
+        app._sync_slots_to_list()
     check(f"最多保留 {app.MAX_MERGE} 个视频",
           len(app.preview_files) == app.MAX_MERGE,
-          f"加入 {n_before}+{len(extra)} 后= {len(app.preview_files)}")
-    check("重复文件不重复添加",
-          len(set(app.preview_files)) == len(app.preview_files), "无重复")
-
-    print("\n== 7b. 超出上限会提示 ==")
-    notified2 = []
-    with mock.patch.object(app, "load_file"), \
-            mock.patch.object(app, "_notify", side_effect=notified2.append):
-        app._add_files([tmp / "over.h264"])
-    check("已达上限时提示超出",
-          any("超出上限" in n for n in notified2), f"提示: {notified2}")
-    check("数量不再增长", len(app.preview_files) == app.MAX_MERGE,
           f"{len(app.preview_files)}")
+    check("槽位与列表数量一致",
+          len(app.canvas_box.slots) == len(app.preview_files),
+          f"{len(app.canvas_box.slots)} vs {len(app.preview_files)}")
+
+    print("\n== 7b. 合并顺序 ==")
+    names = [f.name for f in app.preview_files]
+    check("合并顺序 = 槽位顺序（第1 张卡 = 第 1 段）",
+          names == [f.name for f in extra[:app.MAX_MERGE]],
+          f"{names}")
+    targets = [f.name for f in app._merge_targets()]
+    check("合并目标顺序与槽位一致",
+          targets == names, f"{targets}")
 
     print("\n== 8. 勾选/取消：被取消的项不参与合并 ==")
     before = len(app._merge_targets())

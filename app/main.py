@@ -33,6 +33,7 @@ if __package__ in (None, ""):
 from app import config, ffmpeg_env, packager
 from app.canvas import MaskCanvas
 from app.mask import EFFECT_LABELS, MaskPlan, MaskRegion, scale_box
+from app.merge_list import MergeListMixin
 from app.player import FrameReader, ProxySpec, ensure_proxy
 from app.player_bar import PlayerBar, hhmmss_ms
 from app.progress_bar import SegmentedProgress
@@ -49,7 +50,7 @@ VIDEO_EXTS = (".h264", ".265", ".hevc", ".avc", ".mp4", ".m4v", ".avi", ".mov", 
 
 
 
-class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
+class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
     # 待合并视频的上限：行车记录仪分段录制通常 2~4 段，
     # 更多的话逐段核对列表会变得很费劲，所以卡在 4 个。
     MAX_MERGE = 4
@@ -582,140 +583,6 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
             return
         self.canvas_box.add_slot()
         self._refresh_file_list()
-
-    def _add_files(self, paths: list[Path], *, limit: int | None = None) -> None:
-        """把视频加入合并列表（去重、按上限截断），并刷新列表显示。"""
-        if limit is None:
-            limit = self.MAX_MERGE
-        added = 0
-        dup = 0
-        full = 0
-        room = limit - len(self.preview_files)
-        for p in paths:
-            if p in self.preview_files:
-                dup += 1
-                continue
-            if room <= 0:
-                full += 1
-                continue
-            self.preview_files.append(p)
-            added += 1
-            room -= 1
-        msgs = []
-        if added:
-            msgs.append(f"已加入 {added} 个")
-        if dup:
-            msgs.append(f"{dup} 个重复已跳过")
-        if full:
-            msgs.append(f"{full} 个超出上限（最多 {limit} 个）")
-        if msgs:
-            self._notify("；".join(msgs))
-        self._refresh_file_list()
-        # 第一个视频自动载入主画面，省得再点一次
-        if added and self.src is None:
-            self.load_file(self.preview_files[0])
-
-    def _refresh_preview_bar(self) -> None:
-        """更新顶部的预览列表提示条。"""
-        if not hasattr(self, "lbl_src"):
-            return
-        n = len(self.preview_files)
-        if n == 0:
-            self.lbl_src.config(text="未选择文件")
-            return
-        names = "、".join(f.name for f in self.preview_files[:3])
-        more = f" 等 {n} 个" if n > 3 else ""
-        prefix = f"预览 {n} 个："
-        cur = self.src.name if getattr(self, "src", None) else ""
-        self.lbl_src.config(
-            text=f"{prefix}{names}{more}"
-                 + (f"   （当前：{cur}）" if cur else ""))
-
-    # ---------- 合并列表（拖放加入，可取消）----------
-
-    def _refresh_file_list(self, *, selected: int | None = None) -> None:
-        """刷新合并列表。
-
-        勾选用「✓」前缀表示，取消勾选的行会从合并中排除。
-        """
-        if not hasattr(self, "lst_files"):
-            return
-        self.lst_files.delete(0, "end")
-        for i, f in enumerate(self.preview_files):
-            mark = "✓ " if self._file_enabled(i) else "　 "
-            self.lst_files.insert("end", f"{mark}{f.name}")
-        if selected is not None and 0 <= selected < len(self.preview_files):
-            self.lst_files.selection_set(selected)
-        if hasattr(self, "lbl_list_hint"):
-            total = len(self.preview_files)
-            on = sum(1 for i in range(total) if self._file_enabled(i))
-            self.lbl_list_hint.config(
-                text=f"点「添加视频」或拖文件进来（上限 {self.MAX_MERGE} 个）"
-                if total == 0
-                else f"共 {total}/{self.MAX_MERGE} 个，将按顺序合并 {on} 个")
-
-    def _file_enabled(self, idx: int) -> bool:
-        """第 idx 个文件是否参与合并（默认都参与）。"""
-        disabled = getattr(self, "_files_disabled", None)
-        if not disabled:
-            return True
-        return idx not in disabled
-
-    def _on_file_item_toggle(self, _event=None) -> None:
-        """点击列表项 = 勾选/取消（取消的项不参与合并）。
-
-        用「点一下切换」而不是按住 Ctrl 多选：用户想表达的是
-        「这几段要、那几段不要」，逐项点击最直观。
-        """
-        sel = self.lst_files.curselection()
-        if not sel:
-            return
-        idx = sel[0]
-        disabled = getattr(self, "_files_disabled", None)
-        if disabled is None:
-            disabled = set()
-        if idx in disabled:
-            disabled.discard(idx)
-        else:
-            disabled.add(idx)
-        self._files_disabled = disabled
-        self._refresh_file_list(selected=idx)
-
-    def on_remove_file(self) -> None:
-        """从合并列表移除选中的文件。"""
-        sel = self.lst_files.curselection()
-        if not sel:
-            self._notify("请先在列表里选中要移除的文件")
-            return
-        idx = sel[0]
-        if not (0 <= idx < len(self.preview_files)):
-            return
-        removed = self.preview_files.pop(idx)
-        disabled = getattr(self, "_files_disabled", set())
-        # 索引整体前移一位，取消标记也要跟着挪
-        disabled.discard(idx)
-        self._files_disabled = {i - 1 if i > idx else i for i in disabled}
-        # 移除的正好是当前预览的文件 -> 换成剩余的第一个
-        if getattr(self, "src", None) == removed:
-            self.src = None
-            if self.preview_files:
-                self.load_file(self.preview_files[0])
-        self._refresh_file_list()
-        self._refresh_preview_bar()
-
-    def on_clear_files(self) -> None:
-        """清空合并列表。"""
-        if not self.preview_files:
-            return
-        self.preview_files.clear()
-        self._files_disabled = set()
-        self._refresh_file_list()
-        self._refresh_preview_bar()
-
-    def _merge_targets(self) -> list[Path]:
-        """参与合并的文件（已按列表顺序，跳过被取消的）。"""
-        return [f for i, f in enumerate(self.preview_files)
-                if self._file_enabled(i)]
 
     # ---------- 合并多个分段视频 ----------
     def _sync_merge_btn(self) -> None:
