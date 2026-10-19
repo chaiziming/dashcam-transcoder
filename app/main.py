@@ -303,8 +303,10 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         ttk.Label(grid, text="-", style="Muted.TLabel").grid(row=0, column=2,
                                                             padx=6)
         self.var_end = tk.StringVar()
-        self.tin_end = TimeInput(grid, self.var_end)
+        self.tin_end = TimeInput(grid, self.var_end, prev_input=self.tin_start)
         self.tin_end.grid(row=0, column=3, sticky="w")
+        # 串成一条连续输入流：开始框的秒段填完自动接到结束框的时
+        self.tin_start.next_link = self.tin_end
 
         ttk.Label(grid, text="结束", style="Muted.TLabel").grid(row=0, column=4,
                                                              sticky="w",

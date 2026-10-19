@@ -1,18 +1,20 @@
-"""紧凑的时间输入控件：显示 HH:MM:SS，可用 ↑↓ 与数字键编辑。
+"""紧凑的时间输入控件：显示 HH:MM:SS，用 ↑↓ 与数字键编辑。
 
-设计要点：
-- **文字完全自绘在 Canvas 上**，不用Entry。
-  这样才能精确画出「当前选中位」的高亮块 —— 用 Entry 时，
-  文字居中渲染且不可控，做不出分段高亮，还容易出现
-  `00:00:012` 这类插入型脏数据。
-- 文本恒为固定 8 字符 `HH:MM:SS`，用户只能改其中6 个数字位，冒号不可编辑。
-- 点击某个数字位即选中该位（蓝底白字 + 上下高亮条），输入数字会**覆盖**该位，
-  填满 2 位后自动前进到下一段，直到秒位为止。
-- ↑↓ 对当前位 +1 / -1，循环取值（小时 0~99，分秒 0~59），不会出现负数。
-- `00:00:00 - 00:00:00` 表示整段视频。
+交互设计：
+- **选中的是单个数字位**。高亮只用一块淡蓝背景表示，不描边、
+  不加上下指示条、不给文字换重色 —— 够用且不抢眼。
+- 输入数字时依次覆盖光标所在位，写满两位后自动前进到下一段。
+- 支持**跨框连续输入**：开始框的「秒」段填满后自动跳到结束框的「时」段，
+  结束框填完最后一位停在原地。两个框在操作手感上像一体，
+  但它们是两个独立控件（各管自己的 var）。
+- Backspace 与上述流程相反：把当前位清零并退回上一位；
+  在开始框最前面按 Backspace 会退到结束框的最后一位。
+- ↑↓ 对当前位所属的段做 +1 / -1（时 0~99，分秒 0~59），循环取值，不会为负。
+- 文本恒为 8 字符 `HH:MM:SS`，冒号不可编辑，只有数字位可改。
 
-另外实现上不用 tk.Entry 还有一个好处：readonly 的 Entry 在 Windows 上
-仍然能通过粘贴等方式塞进非法字符，自绘则彻底没有这个入口。
+渲染：全部画在 Canvas 上。不用 tk.Entry 的原因是它文字居中且不可控，
+画不出按位高亮；而且 readonly 的 Entry 在 Windows 上仍可能被粘贴
+灌进非法字符。
 """
 from __future__ import annotations
 
@@ -24,24 +26,21 @@ from .timeutil import format_hhmmss, parse_hhmmss
 BORDER = "#c8ccd4"
 BORDER_FOCUS = ACCENT
 FG = "#1f2933"
-FG_DIM = "#9aa3af"          # 冒号颜色，比数字浅
-SEL_BG = "#dbe8ff"         # 选中位底色
-SEL_FG = "#123a80"# 选中位文字色
-BAR = ACCENT                # 选中位上下指示条
+FG_DIM = "#8b95a3"          # 冒号颜色，比数字浅
+SEL_BG = "#cfe0fb"          # 选中数字位的背景块
 
-# 边框线宽（像素）
 BORDER_W = 2
+# 控件尺寸
+CTRL_W = 104
+CTRL_H = 26
 
 # 每段的最大值（含）。小时 0~99，分/秒 0~59。
 MAX = (99, 59, 59)
-
-# 每段在 8 字符文本中的起止下标（左闭右开）。
+# 每段在 8 字符文本中的起止下标（左闭右开）
 SEG_SPAN = ((0, 2), (3, 5), (6, 8))
+# 段内每个数字位在「6位数字串」里的下标
+SEG_SLOTS = ((0, 1), (2, 3), (4, 5))
 
-# 可被选中的数字位下标（跳过冒号）
-DIGIT_POS = (0, 1, 3, 4, 6, 7)
-
-# 文本字体
 FONT = ("Consolas", 11)
 
 
@@ -50,21 +49,25 @@ def blank_text() -> str:
 
 
 class TimeInput(tk.Frame):
-    """HH:MM:SS 编辑框（数字位可编辑，冒号不可编辑，选中位有高亮）。"""
+    """HH:MM:SS 编辑框（按段选中，支持跨框连续输入）。"""
 
-    def __init__(self, master, var: tk.StringVar, width: int = 108,
-                 height: int = 26, on_change=None):
+    def __init__(self, master, var: tk.StringVar, *, prev_input=None,
+                 width: int = CTRL_W, height: int = CTRL_H, on_change=None):
+        """prev_input / next_link: 相邻的 TimeInput，用于跨框跳转。"""
         super().__init__(master, bg=BORDER, width=width, height=height)
-        # 关闭几何传播：宽高由参数固定，不被子控件反向撑变形。
         self.pack_propagate(False)
         self.var = var
+        self.prev_input = prev_input      # 上一个框（Backspace 往回跳时用）
+        self.next_link = None# 下一个框（正向输入用）
         self.on_change = on_change
         self._focus = False
-        self._pos = 0              # 当前选中的数字位下标
-        self._width = width
-        self._height = height
+        self._seg = 0                   # 当前所在段：0=时 1=分 2=秒
+        self._digit = 0                 # 段内已填到第几位：0=未填 1=填了1位
+        # 注意：不要用 self._w / self._h —— tkinter 用 _w 存控件路径，
+        # 覆盖它会导致创建子控件时报 "int + str" 的 TypeError。
+        self._ctrl_w = width
+        self._ctrl_h = height
 
-        # 控件一创建就填满默认值：结束时间框未点击时也应有 00:00:00
         if not self._valid(self.var.get()):
             self.var.set(blank_text())
 
@@ -76,12 +79,10 @@ class TimeInput(tk.Frame):
         self.canvas.bind("<FocusIn>", self._on_focus_in)
         self.canvas.bind("<FocusOut>", self._on_focus_out)
         self.canvas.bind("<Button-1>", self._on_click)
-        self.canvas.bind("<Left>", lambda e: self._move(-1))
-        self.canvas.bind("<Right>", lambda e: self._move(1))
+        self.canvas.bind("<Right>", lambda e: self._move_seg(1))
+        self.canvas.bind("<Left>", lambda e: self._move_seg(-1))
         self.canvas.bind("<Up>", lambda e: self._bump(1))
         self.canvas.bind("<Down>", lambda e: self._bump(-1))
-        self.canvas.bind("<Home>", lambda e: self._goto(0))
-        self.canvas.bind("<End>", lambda e: self._goto(7))
         self.canvas.bind("<KeyPress>", self._on_key)
         self.canvas.bind("<BackSpace>", self._on_backspace)
         self.var.trace_add("write", lambda *_: self._render())
@@ -90,76 +91,54 @@ class TimeInput(tk.Frame):
     # ---------- 文本工具 ----------
     @staticmethod
     def _valid(text: str) -> bool:
-        """文本是否已经是合法的 HH:MM:SS。"""
         return (isinstance(text, str) and len(text) == 8
                 and text[2] == ":" and text[5] == ":"
                 and all(c.isdigit() for c in text[:2] + text[3:5] + text[6:8]))
 
     def _digits(self) -> str:
-        """取出 6 个数字位（不含冒号）。"""
         t = self.var.get() if self._valid(self.var.get()) else blank_text()
         return t[0:2] + t[3:5] + t[6:8]
 
     def _put_digits(self, digits: str) -> None:
-        """把 6 个数字位写回 HH:MM:SS 格式。"""
         h, m, s = digits[0:2], digits[2:4], digits[4:6]
         self.var.set(f"{h}:{m}:{s}")
 
-    def _slot(self, pos: int) -> int:
-        """数字位下标 -> 在 6 位数字串里的下标。"""
-        return {0: 0, 1: 1, 3: 2, 4: 3, 6: 4, 7: 5}[pos]
-
-    def _seg_of(self, pos: int) -> int:
-        return 0 if pos < 3 else (1 if pos < 6 else 2)
-
     # ---------- 渲染 ----------
     def _render(self) -> None:
-        """重绘整个控件：边框 + 选中高亮 + 文字。
-
-        不能对 Canvas 用 delete("all") 之外的方式保留旧元素 ——
-        这里每帧都重建，所以必须一次删干净再画。
-        """
         c = self.canvas
         c.delete("all")
         w = max(1, c.winfo_width())
         h = max(1, c.winfo_height())
 
-        # 外边框
         color = BORDER_FOCUS if self._focus else BORDER
         c.create_rectangle(
             BORDER_W / 2, BORDER_W / 2, w - BORDER_W / 2, h - BORDER_W / 2,
             outline=color, width=BORDER_W, fill="")
 
         text = self.var.get() if self._valid(self.var.get()) else blank_text()
-        pad = BORDER_W + 6
-        cw = w - pad * 2
-        ch = h - pad * 2
-        char_w = cw / 8.0          # 每个字符占的宽度
+        pad = BORDER_W + 5
+        char_w = (w - pad * 2) / 8.0
         cy = h // 2
+        seg_start, seg_end = SEG_SPAN[self._seg]
 
-        # 选中位高亮（仅聚焦时显示）
+        # 选中段用背景块表示（不描粗、不换重色），视觉克制
         if self._focus:
-            x0 = pad + char_w * self._pos
-            x1 = pad + char_w * (self._pos + 1)
-            c.create_rectangle(x0, pad, x1, h - pad, fill=SEL_BG, outline="")
-            # 上下各一条指示条，让选中边界一眼可见
-            c.create_rectangle(x0, pad, x1, pad + 2, fill=BAR, outline="")
-            c.create_rectangle(x0, h - pad - 2, x1, h - pad, fill=BAR,
-                               outline="")
+            # 当前数字位下标（由 _seg 与 _digit 组合得出）
+            cur = SEG_SPAN[self._seg][0] + self._digit
+            # 单个数字位的轻量选中：只加一个淡蓝背景块，不描边、
+            # 不加上下指示条、文字保持原色 —— 视觉克制但仍能看出选了哪一位。
+            x0 = pad + char_w * cur
+            x1 = pad + char_w * (cur + 1)
+            c.create_rectangle(x0 + 1, pad + 3, x1 - 1, h - pad - 3,
+                               fill=SEL_BG, outline="")
 
-        # 文字
         for i, chx in enumerate(text):
             if chx == ":":
                 c.create_text(pad + char_w * (i + 0.5), cy, text=":",
                               fill=FG_DIM, font=FONT)
-                continue
-            selected = self._focus and i == self._pos
-            c.create_text(
-                pad + char_w * (i + 0.5), cy, text=chx,
-                fill=SEL_FG if selected else FG,
-                font=FONT,
-                # 加粗描一下，未聚焦时也能看出段与段的边界
-                width=max(1, int(char_w * 0.12)) if not selected else 0)
+            else:
+                c.create_text(pad + char_w * (i + 0.5), cy, text=chx,
+                              fill=FG, font=FONT)
 
     # ---------- 焦点 ----------
     def _on_focus_in(self, _e=None) -> None:
@@ -167,99 +146,140 @@ class TimeInput(tk.Frame):
         self.canvas.focus_set()
         if not self._valid(self.var.get()):
             self.var.set(blank_text())
+        self._digit = 0
         self._render()
 
     def _on_focus_out(self, _e=None) -> None:
         self._focus = False
+        self._digit = 0
         if not self._valid(self.var.get()):
             self.var.set(blank_text())
         self._render()
 
-    # ---------- 光标定位 ----------
+    # ---------- 定位 ----------
     def _on_click(self, e) -> str:
-        """点击某个数字位即选中该位。"""
+        """点击落到哪一段就选中哪一段。"""
         self.canvas.focus_set()
         self._focus = True
         w = max(1, self.canvas.winfo_width())
-        pad = BORDER_W + 6
+        pad = BORDER_W + 5
         char_w = (w - pad * 2) / 8.0
         idx = int((e.x - pad) / char_w) if char_w > 0 else 0
-        idx = max(0, min(7, idx))
-        # 点在冒号上时，归到该冒号左侧的那一段末位
-        if idx in (2, 5):
-            idx = idx - 1
-        self._goto(idx)
+        self._goto(max(0, min(7, idx)))
         return "break"
+
+    def _move_seg(self, step: int) -> str:
+        """左右键在段之间移动。"""
+        self._seg = max(0, min(2, self._seg + step))
+        self._digit = 0
+        self._render()
+        return "break"
+
+    # ---------- 兼容访问 ----------
+    @property
+    def _pos(self) -> int:
+        """当前数字位在 8 字符文本中的下标（等价于 _seg/_digit 组合）。"""
+        return SEG_SPAN[self._seg][0] + self._digit
 
     def _goto(self, idx: int) -> None:
-        """把选中位移到最接近 idx 的数字位上。"""
+        """把光标定位到指定字符下标；点在冒号上则归到左侧那一位。"""
+        if idx >= 8:
+            idx = 7
         if idx <= 1:
-            self._pos = max(0, min(1, idx))
+            self._seg, self._digit = 0, idx
         elif idx <= 4:
-            self._pos = 3 + max(0, min(1, idx - 3))
+            self._seg, self._digit = 1, idx - 3
         else:
-            self._pos = 6 + max(0, min(1, idx - 6))
+            self._seg, self._digit = 2, idx - 6
+        self._digit = max(0, min(1, self._digit))
         self._render()
-
-    def _move(self, step: int) -> str:
-        """左右键在 6 个数字位之间移动。"""
-        cur = DIGIT_POS.index(self._pos) if self._pos in DIGIT_POS else 0
-        nxt = max(0, min(len(DIGIT_POS) - 1, cur + step))
-        self._pos = DIGIT_POS[nxt]
-        self._render()
-        return "break"
 
     # ---------- 输入 ----------
     def _on_key(self, e: tk.Event) -> str:
-        """只接受数字：覆盖当前位，填满 2 位后自动前进。"""
+        """只接受数字：写入当前段，填满两位后前进。"""
         if e.keysym in ("BackSpace", "Delete"):
-            return "break"       # 交给各自的绑定处理，避免被此处吞掉
+            return "break"
         ch = e.char
         if len(ch) != 1 or not ch.isdigit():
-            return "break"       # 包括 ':'，冒号不可编辑
+            return "break"
 
         digits = list(self._digits())
-        digits[self._slot(self._pos)] = ch
+        # _digit 越界时兜底到段内最后一位，避免外部误调用导致 IndexError
+        digit = 0 if self._digit < 0 else (1 if self._digit > 1 else self._digit)
+        slot = SEG_SLOTS[self._seg][digit]
+        digits[slot] = ch
         self._put_digits("".join(digits))
+        self._digit = digit + 1
 
-        seg = self._seg_of(self._pos)
-        start, end = SEG_SPAN[seg]
-        if self._pos == end - 1:              # 刚填的是本段最后一位
-            if seg < 2:
-                self._pos = end + 1            # 跳过冒号，落到下一段首位
-        else:                                   # 填的是本段第一位
-            self._pos = end - 1
-        self._render()
+        if self._digit >= 2:
+            # 本段填满 -> 下一段；秒段填满 -> 跳到下一个框
+            if self._seg < 2:
+                self._seg += 1
+                self._digit = 0
+                self._render()
+            else:
+                # 秒段已满：接下一个框；若没有后续框则停在最后一位，
+                # 这样再输入只会覆盖该位，不会写错位置
+                nxt = self.next_link
+                if nxt is not None:
+                    nxt._jump_in()      # 跨框接着输入
+                else:
+                    self._digit = 1
+                    self._render()
+        else:
+            self._render()
         if self.on_change:
             self.on_change()
         return "break"
 
     def _on_backspace(self, _e=None) -> str:
-        """Backspace：把当前位归零，并退到前一个数字位。
+        """Backspace：把当前位清零，并退回前一位。
 
-        行为类似手机时间选择器：清掉当前位，再回到上一位继续编辑。
-        已在最前一位时，把该位置零即可（不再回退）。
+        与正向输入严格对称：正向是一位一位往后填，这里就一位一位往前退。
+        在本框最前面按 Backspace 会退到上一个框的最后一位。
         """
         digits = list(self._digits())
-        digits[self._slot(self._pos)] = "0"
+        a, _b = SEG_SLOTS[self._seg]
+        digits[a + self._digit] = "0"
         self._put_digits("".join(digits))
 
-        # 回退到前一个数字位（最前一位则原地清零）
-        if self._pos in DIGIT_POS:
-            cur = DIGIT_POS.index(self._pos)
-            if cur > 0:
-                self._pos = DIGIT_POS[cur - 1]
-        self._render()
+        # 退回前一个数字位
+        cur = self._seg * 2 + self._digit      # 0..5
+        if cur > 0:
+            self._seg = (cur - 1) // 2
+            self._digit = (cur - 1) % 2
+            self._render()
+        else:
+            prev = self.prev_input
+            if prev is not None:
+                prev._jump_back()
+            else:
+                self._render()
         if self.on_change:
             self.on_change()
         return "break"
 
+    def _jump_in(self) -> None:
+        """被上一个框调用：接收焦点并停在「时」段，等待输入。"""
+        self._focus = True
+        self.canvas.focus_set()
+        self._seg = 0
+        self._digit = 0
+        self._render()
+
+    def _jump_back(self) -> None:
+        """被下一个框调用（Backspace）：停在最后一位，位置对齐退过来的方向。"""
+        self._focus = True
+        self.canvas.focus_set()
+        self._seg = 2
+        self._digit = 1
+        self._render()
+
     def _bump(self, delta: int) -> str:
-        """↑↓ 对当前位 +1 / -1，循环取值（不会为负）。"""
+        """↑↓ 对当前段 +1 / -1，循环取值（不会为负）。"""
         sec = parse_hhmmss(self.var.get()) or 0.0
         parts = [int(sec // 3600) % 100, int(sec // 60) % 60, int(sec) % 60]
-        seg = self._seg_of(self._pos)
-        parts[seg] = (parts[seg] + delta) % (MAX[seg] + 1)
+        parts[self._seg] = (parts[self._seg] + delta) % (MAX[self._seg] + 1)
         self._put_digits(f"{parts[0]:02d}{parts[1]:02d}{parts[2]:02d}")
         if self.on_change:
             self.on_change()
