@@ -27,6 +27,8 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 class Ev:
     def __init__(self, ch: str):
         self.char = ch
+        # 模拟 tkinter 事件对象的 keysym：可打印字符与其本身同名
+        self.keysym = ch if ch else "BackSpace"
 
 
 def key(ti, ch: str) -> str | None:
@@ -50,9 +52,8 @@ def main() -> int:
     check("开始框创建后即为 00:00:00", vs.get() == "00:00:00", vs.get())
     check("结束框创建后即为 00:00:00（不必点击）", ve.get() == "00:00:00",
           ve.get())
-    check("Entry 处于 readonly（无法直接编辑）",
-          str(tin_e.entry["state"]) == "readonly",
-          str(tin_e.entry["state"]))
+    check("不使用 Entry（文字自绘，无法被粘贴灌入非法字符）",
+          not hasattr(tin_e, "entry"), "已改为 Canvas 自绘")
 
     print("\n== 2. 在「时」位输入 00，覆盖并自动前进 ==")
     ve.set("00:00:00")
@@ -167,7 +168,64 @@ def main() -> int:
           all(c.isdigit() for c in ve.get()[:2] + ve.get()[3:5] + ve.get()[6:]),
           ve.get())
 
-    print("\n== 11. 辅助方法 ==")
+    print("\n== 11. Backspace：位置归零并回退 ==")
+    ve.set("12:34:56")
+    tin_e._goto(7)                       # 秒位末
+    tin_e._on_backspace()
+    check("秒位归零 -> 12:34:50", ve.get() == "12:34:50", ve.get())
+    check("位置回退到秒位首（_pos=6）", tin_e._pos == 6, f"_pos={tin_e._pos}")
+    tin_e._on_backspace()
+    check("秒位再归零 -> 12:34:00", ve.get() == "12:34:00", ve.get())
+    check("回退到分位末（_pos=4）", tin_e._pos == 4, f"_pos={tin_e._pos}")
+    tin_e._on_backspace()
+    check("分位归零 -> 12:30:00", ve.get() == "12:30:00", ve.get())
+    check("回退到分位首（_pos=3）", tin_e._pos == 3, f"_pos={tin_e._pos}")
+    for _ in range(4):
+        tin_e._on_backspace()
+    check("一路回退并清零 -> 00:00:00", ve.get() == "00:00:00", ve.get())
+    check("在最前一位时不再回退（_pos=0）", tin_e._pos == 0, f"_pos={tin_e._pos}")
+    tin_e._on_backspace()
+    check("最前位再按仍是 00:00:00", ve.get() == "00:00:00", ve.get())
+
+    print("\n== 12. 选中位高亮可见 ==")
+    from app.time_input import BAR, SEL_BG
+    tin_e._focus = True
+    tin_e._goto(0)
+    tin_e._render()
+    root.update()
+    fills = [tin_e.canvas.itemcget(i, "fill")
+             for i in tin_e.canvas.find_all()
+             if tin_e.canvas.type(i) == "rectangle"]
+    check("绘制了选中位底色", SEL_BG in fills, f"fills={set(fills)}")
+    check("绘制了上下指示条（蓝色）", BAR in fills, f"含{SEL_BG}/{BAR}")
+    bars = [i for i in tin_e.canvas.find_all()
+            if tin_e.canvas.type(i) == "rectangle"
+            and tin_e.canvas.itemcget(i, "fill") == BAR]
+    check("指示条有两条（上/下）", len(bars) >= 2, f"{len(bars)} 条")
+
+    # 换段时高亮应跟着移动
+    xs = []
+    for pos in (0, 3, 6):
+        tin_e._goto(pos)
+        tin_e._render()
+        root.update()
+        bb = [tin_e.canvas.bbox(i) for i in tin_e.canvas.find_all()
+              if tin_e.canvas.type(i) == "rectangle"
+              and tin_e.canvas.itemcget(i, "fill") == SEL_BG][0]
+        xs.append(bb[0])
+    check("时/分/秒三段高亮位置各不相同", len(set(xs)) == 3, f"x={xs}")
+    check("高亮从左到右递增", xs[0] < xs[1] < xs[2], f"x={xs}")
+
+    tin_e._focus = False
+    tin_e._render()
+    root.update()
+    check("失焦后不再有选中底色",
+          SEL_BG not in [tin_e.canvas.itemcget(i, "fill")
+                         for i in tin_e.canvas.find_all()
+                         if tin_e.canvas.type(i) == "rectangle"],
+          "失焦应无高亮")
+
+    print("\n== 13. 辅助方法 ==")
     tin_e.set_seconds(3661)
     check("set_seconds(3661) -> 01:01:01", ve.get() == "01:01:01", ve.get())
     check("get_seconds() -> 3661", tin_e.get_seconds() == 3661)

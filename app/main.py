@@ -310,7 +310,7 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
                                                              sticky="w",
                                                              padx=(5, 0))
         r += 1
-        ttk.Label(side, text="点击输入框后用 ↑↓ 微调时/分/秒",
+        ttk.Label(side, text="点击输入框后用 ↑↓ 微调时 : 分 : 秒",
                   style="Muted.TLabel").grid(row=r, column=0, sticky="w", pady=(0, 10))
         r += 1
 
