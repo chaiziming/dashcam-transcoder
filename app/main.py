@@ -287,24 +287,30 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         # 时间段
         ttk.Separator(side).grid(row=r, column=0, sticky="ew", pady=(0, 10))
         r += 1
-        ttk.Label(side, text="时间段（留空 = 整段）", style="Section.TLabel").grid(
+        ttk.Label(side, text="时间段", style="Section.TLabel").grid(
             row=r, column=0, sticky="w", pady=(0, 6))
         r += 1
+        # 单行紧凑排布：开始 [00:00:00] - [00:00:00] 结束
         grid = ttk.Frame(side, style="Card.TFrame")
-        grid.grid(row=r, column=0, sticky="ew", pady=(0, 4))
-        grid.columnconfigure(1, weight=1)
-        grid.columnconfigure(3, weight=1)
-        ttk.Label(grid, text="开始", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
-        self.var_start = tk.StringVar()
-        self.tin_start = TimeInput(grid, self.var_start, width=10)
-        self.tin_start.grid(row=0, column=1, sticky="ew", padx=(4, 10))
-        ttk.Label(grid, text="结束", style="Muted.TLabel").grid(row=0, column=2, sticky="w")
+        grid.grid(row=r, column=0, sticky="w", pady=(0, 4))
+        ttk.Label(grid, text="开始", style="Muted.TLabel").grid(row=0, column=0,
+                                                             sticky="w",
+                                                             padx=(0, 5))
+        self.var_start = tk.StringVar(value="00:00:00")
+        self.tin_start = TimeInput(grid, self.var_start)
+        self.tin_start.grid(row=0, column=1, sticky="w")
+
+        ttk.Label(grid, text="-", style="Muted.TLabel").grid(row=0, column=2,
+                                                            padx=6)
         self.var_end = tk.StringVar()
-        self.tin_end = TimeInput(grid, self.var_end, width=10)
-        self.tin_end.grid(row=0, column=3, sticky="ew", padx=(4, 0))
+        self.tin_end = TimeInput(grid, self.var_end)
+        self.tin_end.grid(row=0, column=3, sticky="w")
+
+        ttk.Label(grid, text="结束", style="Muted.TLabel").grid(row=0, column=4,
+                                                             sticky="w",
+                                                             padx=(5, 0))
         r += 1
-        ttk.Label(side,
-                  text="可点框选、也可直接键入（↑↓ 微调），格式 HH:MM:SS",
+        ttk.Label(side, text="点击输入框后用 ↑↓ 微调时/分/秒",
                   style="Muted.TLabel").grid(row=r, column=0, sticky="w", pady=(0, 10))
         r += 1
 
@@ -1238,7 +1244,11 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         except ValueError as e:
             messagebox.showwarning("时间格式错误", str(e))
             return
-        if start is not None and end is not None and end <= start:
+        # `00:00:00 - 00:00:00` 是「整段」的明确写法（用户约定），
+        # 不当成非法范围；两者相等且都是 0 时直接按整段处理。
+        both_zero = (start == 0.0 and (end is None or end == 0.0))
+        if (not both_zero and start is not None and end is not None
+                and end <= start):
             messagebox.showwarning("时间范围错误", "结束时间必须大于开始时间。")
             return
         if end is not None and self.info.duration and end > self.info.duration + 5:

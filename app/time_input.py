@@ -1,256 +1,193 @@
-"""时间输入控件：像 Web 的 `<input type="time">` 一样可填也可点。
+"""时间输入控件：紧凑的 HH:MM:SS 微调框。
 
-为什么需要它：
-原来的 ttk.Entry 只能手打 "00:01:00"，打错格式要到点「开始处理」
-才知道报错；打错分隔符（比如用点号）也常常是整段被忽略。
-用户明确要求「可填也可点」。
+交互规则（按需求定，不做多余功能）：
+  - 显示固定格式 HH:MM:SS，只有时分秒三位
+  - 禁止输入非数字字符：按键层面拦截，不靠事后校验
+  - 不提供下拉列表
+  - 光标停在时分秒区域内时，↑↓ 分别对该位 +1 / -1
+  - 取值范围：时 0~99，分/秒 0~59（用户说的 60 是「上限前一档」，
+    实际 60 秒就是 1 分，归一化后显示 01:00）
+  - 循环：最大值 +1 -> 最小值；最小值 -1 -> 最大值
 
-交互设计：
-- 可直接键入：00 / 00:01 / 00:01:00 三种粒度都接受，1-3 段均可
-- 可点击：点框弹出滚轮式面板（时 / 分 / 秒三列），点数字即选中
-- 键盘微调：↑↓ 调选中位，PageUp/PageDown 跳 5，Tab/左右键换位
-- 失焦自动规范化成 HH:MM:SS
-- 焦点态用蓝色描边，和整体风格一致
+绘制：tk.Frame + Canvas 自绘（ttk 无法只描边不填充），
+Entry 叠在 Canvas 上，保证只有输入框区域有白底。
 """
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
 
+from .theme import ACCENT
 from .timeutil import format_hhmmss, parse_hhmmss
 
-ACCENT = "#2f6feb"
 BORDER = "#c8ccd4"
 BORDER_FOCUS = ACCENT
-BG = "#ffffff"
 FG = "#1f2933"
-MUTED = "#6b7280"
 
-# 滚轮面板每次滚动的步长
-_STEP = {"hour": 1, "min": 1, "sec": 1}
-_BIG_STEP = 5
+# 单段最大值（含）：时最大 99，分/秒最大 59
+MAX = (99, 59, 59)
+# 三段的字符区间：[起, 止) —— 用于把光标位置映射到段
+SEG_SPAN = ((0, 2), (3, 5), (6, 8))
 
 
 class TimeInput(tk.Frame):
-    """可填可点的时间输入框（HH:MM:SS）。
+    """HH:MM:SS 微调输入框。"""
 
-    用 tk.Frame 而非 ttk.Frame：ttk 的样式必须预先注册，
-    而本控件外观完全由内层 Canvas 自绘，不需要 ttk 主题。
-    """
-
-    def __init__(self, master, var: tk.StringVar, width: int = 10,
+    def __init__(self, master, var: tk.StringVar, width: int = 96,
                  on_change=None):
-        # 用 tk.Frame 而不是 ttk.Frame：ttk 需要预先注册自定义样式，
-        # 这里样式完全由内层 Canvas 绘制，不依赖 ttk 主题。
-        super().__init__(master, bg=BORDER)
+        super().__init__(master, bg=BORDER, width=width, height=24)
+        # 关闭几何传播：宽高由下面的 width/height 参数固定，
+        # 不被子控件（Entry 的请求尺寸）反向撑变形。
+        self.pack_propagate(False)
         self.var = var
         self.on_change = on_change
-        self._seg = 1          # 当前选中段：0=时 1=分 2=秒
-        self._menu = None
         self._focus = False
+        self._seg = 1              # 当前段：0=时 1=分 2=秒
+        self._width = width
 
-        # 外层用 Canvas 画边框，Entry 本身透明叠加 —— ttk.Entry 无法直接描边
-        self.canvas = tk.Canvas(self, height=26, bg=BORDER,
+        self.canvas = tk.Canvas(self, width=width, height=24, bg=BORDER,
                                 highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
 
-        self.entry = tk.Entry(self.canvas, textvariable=self.var,
-                              justify="center", bd=0, highlightthickness=0,
-                              bg=BG, fg=FG, insertbackground=ACCENT,
-                              font=("Segoe UI", 10))
-        self.win = self.canvas.create_window(0, 0, anchor="w",
+        # Entry 完全透明（bg 同边框色），只有 focus 态才画白底
+        self.entry = tk.Entry(
+            self.canvas, textvariable=self.var, justify="center",
+            bd=0, highlightthickness=0, bg=BORDER, fg=FG,
+            insertbackground=ACCENT, disabledbackground=BORDER,
+            font=("Segoe UI", 10))
+        # 注意：create_window 的 width/height 只是「初始请求尺寸」，
+        # 若不在 <Configure> 里用 itemconfigure 重新设置，窗口实际会是 1x1。
+        self.win = self.canvas.create_window(0, 0, anchor="center",
                                              window=self.entry,
-                                             width=width * 8, height=24)
+                                             width=width - 2, height=22)
 
         self.canvas.bind("<Configure>", self._layout)
         self.entry.bind("<FocusIn>", self._on_focus_in)
         self.entry.bind("<FocusOut>", self._on_focus_out)
-        self.entry.bind("<Button-1>", self._on_click, add="+")
-        self.entry.bind("<Button-3>", self._on_right_click)
         self.entry.bind("<KeyPress>", self._on_key)
         self.entry.bind("<Up>", lambda e: self._bump(1))
         self.entry.bind("<Down>", lambda e: self._bump(-1))
-        self.entry.bind("<Prior>", lambda e: self._bump(_BIG_STEP))
-        self.entry.bind("<Next>", lambda e: self._bump(-_BIG_STEP))
         self.var.trace_add("write", lambda *_: self._draw())
+        self._draw()
 
     # ---------- 绘制 ----------
     def _layout(self, _e=None) -> None:
-        h = self.canvas.winfo_height()
-        w = self.canvas.winfo_width()
-        self.canvas.coords(self.win, max(1, (w - self.entry.winfo_width()) // 2),
-                           h // 2)
+        w = max(1, self.canvas.winfo_width())
+        h = max(1, self.canvas.winfo_height())
+        # Entry 宽度跟随 Canvas，但不超过设定值（防止被拉得过宽）
+        ew = min(self._width - 2, max(60, w - 2))
+        self.canvas.itemconfigure(self.win, width=ew, height=h - 2)
+        self.canvas.coords(self.win, max(1, (w - ew) // 2), h // 2)
         self._draw()
 
     def _draw(self) -> None:
-        """重画外框：聚焦时用蓝色，非聚焦用灰色。"""
+        """聚焦时画白底（输入框区域），非聚焦时与背景融为一体。
+
+        注意：只删带border 标签的元素，**绝不能用 delete("all")** ——
+        那会把 create_window 嵌入的 Entry 窗口一起删掉，
+        表现为 Entry 尺寸变成 1x1、整框看不见内容。
+        """
         self.canvas.delete("border")
-        h = max(1, self.canvas.winfo_height())
         w = max(1, self.canvas.winfo_width())
-        color = BORDER_FOCUS if self._focus else BORDER
-        self.canvas.create_rectangle(0, 0, w, h, outline=color, width=2,
-                                     tags="border")
+        h = max(1, self.canvas.winfo_height())
+        if self._focus:
+            self.canvas.create_rectangle(1, 1, w - 2, h - 2, fill="#ffffff",
+                                         outline=BORDER_FOCUS, width=2,
+                                         tags="border")
+        else:
+            self.canvas.create_rectangle(0, 0, w, h, fill=BORDER, outline="",
+                                         tags="border")
+        # 边框画在 Entry 之下，避免遮住文字
+        self.canvas.tag_lower("border")
 
     # ---------- 焦点 ----------
     def _on_focus_in(self, _e=None) -> None:
         self._focus = True
+        self.entry.config(bg="#ffffff")
+        # 空值时先填 00:00:00，避免焦点落在空框上不知当前是哪一段
+        if not self.var.get().strip():
+            self.var.set("00:00:00")
         self._draw()
         self._sync_seg()
 
     def _on_focus_out(self, _e=None) -> None:
         self._focus = False
-        self._close_menu()
+        self.entry.config(bg=BORDER)
         self._normalize()
         self._draw()
 
-    def _sync_seg(self) -> None:
-        """根据光标位置判断当前在改哪一段。"""
-        try:
-            idx = self.entry.index("insert")
-        except tk.TclError:
-            idx = len(self.var.get())
-        # HH:MM:SS 中分隔符在 2、5；光标 >=5 -> 秒，>=2 -> 分，否则 -> 时
-        if idx >= 6:
-            self._seg = 2
-        elif idx >= 3:
-            self._seg = 1
-        else:
-            self._seg = 0
-
     def _normalize(self) -> None:
-        """失焦时把 HH:MM / MM:SS / 纯秒数统一成 HH:MM:SS；非法则清空。"""
+        """把任意可接受的写法统一成 HH:MM:SS；空则补 00:00:00。"""
         raw = self.var.get().strip()
         if not raw:
+            self.var.set("00:00:00")
             return
         try:
             sec = parse_hhmmss(raw)
         except ValueError:
-            return          # 保留原样，让用户自己看到问题，不要静默吞掉
-        self.var.set(format_hhmmss(sec))
-
-    # ---------- 点击 ----------
-    def _on_click(self, _e=None) -> None:
-        self.entry.focus_set()
-        self._sync_seg()
-        if self.var.get().strip():
-            self._open_menu()
-
-    def _on_right_click(self, _e=None) -> None:
-        self._open_menu()
-
-    # ---------- 滚轮菜单 ----------
-    def _open_menu(self) -> None:
-        if self._menu is not None:
+            return            # 输入层已拦掉非数字，这里只兜底
+        if sec is None:
+            self.var.set("00:00:00")
             return
-        sec = parse_hhmmss(self.var.get()) or 0.0
-        vals = self._parts(sec)
-        top = self.winfo_rooty() + self.winfo_height()
-        left = self.winfo_rootx()
-        self._menu = tk.Toplevel(self)
-        self._menu.overrideredirect(True)
-        self._menu.geometry(f"+{left}+{top}")
-
-        frm = tk.Frame(self._menu, bg="#ffffff", bd=1, relief="solid")
-        frm.pack()
-        names = ("时", "分", "秒")
-        # 每列若干可选值（围绕当前值上下各若干个），点一下即选中
-        for i, name in enumerate(names):
-            col = tk.Frame(frm, bg="#ffffff")
-            col.pack(side="left", padx=2, pady=2)
-            tk.Label(col, text=name, bg="#ffffff", fg=MUTED,
-                     font=("Segoe UI", 8)).pack()
-            base = vals[i]
-            rng = range(10) if i == 0 else range(60)
-            # 只列出当前值附近的 7 个，避免一列 60 项太长
-            span = 7
-            start = max(0, min(max(0, base - span // 2),
-                               max(rng) - span + 1))
-            shown = [v % (100 if i == 0 else 60) for v in
-                     range(start, start + span)]
-            for v in shown:
-                sel = v == base
-                b = tk.Label(
-                    col, text=f"{v:02d}",
-                    bg=ACCENT if sel else "#ffffff",
-                    fg="#ffffff" if sel else FG,
-                    width=3, cursor="hand2",
-                    font=("Segoe UI", 9, "bold" if sel else "normal"))
-                b.pack(pady=1)
-                b.bind("<Button-1>",
-                       lambda _e, seg=i, val=v: self._pick(seg, val))
-                b.bind("<Enter>", lambda _e, w=b: w.configure(bg="#e8eefc"))
-                b.bind("<Leave>", lambda _e, w=b, s=sel: w.configure(
-                    bg=ACCENT if s else "#ffffff"))
-        # 点外面关闭
-        self._menu.bind("<FocusOut>", lambda _e: self._close_menu())
-
-    def _close_menu(self) -> None:
-        if self._menu is not None:
-            try:
-                self._menu.destroy()
-            except tk.TclError:
-                pass
-            self._menu = None
-
-    def _parts(self, sec: float) -> list[int]:
-        """秒 -> [时, 分, 秒]。"""
-        return [int(sec // 3600) % 100, int(sec // 60) % 60, int(sec) % 60]
-
-    def _pick(self, seg: int, val: int) -> None:
-        parts = self._parts(parse_hhmmss(self.var.get()) or 0.0)
-        parts[seg] = val
+        parts = [int(sec // 3600) % 100, int(sec // 60) % 60, int(sec) % 60]
         self.var.set(format_hhmmss(parts[0] * 3600 + parts[1] * 60 + parts[2]))
-        self._seg = seg
-        self._close_menu()
-        if self.on_change:
-            self.on_change()
 
     # ---------- 键盘 ----------
-    def _on_key(self, e: tk.Event) -> None:
+    def _on_key(self, e: tk.Event) -> str | None:
         ch = e.char
-        if ch.isdigit():
-            self._close_menu()
-            self._auto_advance(len(self.var.get()))
-            return
-        if ch in (":", ".", "：", " ", "-"):
-            self._close_menu()
-            self._advance_seg()
-            return
-        if ch == "\b" or e.keysym == "BackSpace":
-            self._close_menu()
-            return
-        if ch == "\x7f":      # Delete
-            self.var.set("")
-            self._close_menu()
-            return
-        self._close_menu()
+        # 只放行数字；冒号用于分隔段，也允许（用户可能直接打 00:01:00）
+        if ch.isdigit() or ch == ":":
+            self._auto_advance()
+            return None
+        # 其余一律拦截：字母、空格、符号、以及退格/删除
+        return "break"
 
-    def _auto_advance(self, cur_len: int) -> None:
-        """输入到 2 位且当前段未满时自动跳到下一段。"""
-        if cur_len in (2, 5):
+    def _auto_advance(self) -> None:
+        """输入到某段末尾（2 位）后自动跳到下一段。"""
+        try:
+            n = len(self.var.get().rstrip(":"))
+        except tk.TclError:
+            return
+        if n in (2, 5):
             self._advance_seg()
 
     def _advance_seg(self) -> None:
-        if self._seg < 2:
+        pos = {0: 3, 1: 6}.get(self._seg)
+        if self._seg < 2 and pos is not None:
             self._seg += 1
-            # 把光标放到下一段开头
-            pos = {0: 3, 1: 6, 2: 8}[self._seg]
             try:
                 self.entry.icursor(min(pos, len(self.var.get())))
             except tk.TclError:
                 pass
 
-    def _bump(self, delta: int) -> str:
-        """↑↓ 微调当前段。
+    def _sync_seg(self) -> None:
+        """光标落在哪一段，就把该段设为当前段。"""
+        try:
+            idx = self.entry.index("insert")
+        except tk.TclError:
+            idx = 0
+        self._seg = 2 if idx >= 6 else (1 if idx >= 3 else 0)
 
-        不在这里重算 _seg：调用方（按键绑定）已经把当前段定好了，
-        重算会把用户刚选中的段覆盖掉。
-        """
-        self._close_menu()
-        parts = self._parts(parse_hhmmss(self.var.get()) or 0.0)
-        limit = 100 if self._seg == 0 else 60
-        parts[self._seg] = (parts[self._seg] + delta) % limit
+    def _bump(self, delta: int) -> str:
+        """↑↓ 对当前段 +1 / -1，循环取值。"""
+        self._sync_seg()
+        try:
+            sec = parse_hhmmss(self.var.get()) or 0.0
+        except ValueError:
+            sec = 0.0
+        parts = [int(sec // 3600) % 100, int(sec // 60) % 60, int(sec) % 60]
+        hi = MAX[self._seg]
+        parts[self._seg] = (parts[self._seg] + delta) % (hi + 1)
         self.var.set(format_hhmmss(parts[0] * 3600 + parts[1] * 60 + parts[2]))
         if self.on_change:
             self.on_change()
         return "break"
+
+    # ---------- 供测试/外部使用 ----------
+    def set_seconds(self, sec: float) -> None:
+        self.var.set(format_hhmmss(sec))
+
+    def get_seconds(self) -> float | None:
+        try:
+            return parse_hhmmss(self.var.get())
+        except ValueError:
+            return None
