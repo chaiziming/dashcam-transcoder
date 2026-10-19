@@ -159,11 +159,11 @@ def build_ui() -> None:
         return not (ax + aw <= bx2 or bx2 + bw2 <= ax or ay + ah <= by2 or by2 + bh2 <= ay)
 
     try:
-        b = bx(app.btn_choose); lb = bx(app.lbl_src)
+        b = bx(app.btn_choose); lb = bx(app.lbl_status)
         check("控件已真实布局(非1x1)", b[2] > 10 and b[3] > 10, f"btn={b[2]}x{b[3]}")
-        check("选择按钮 与 文件名标签 不重叠", not overlaps(app.btn_choose, app.lbl_src),
+        check("添加视频按钮 与 状态标签 不重叠", not overlaps(app.btn_choose, app.lbl_status),
               f"btn={b} lbl={lb}")
-        check("文件名标签 位于按钮右侧", lb[0] >= b[0] + b[2],
+        check("状态标签 位于按钮右侧", lb[0] >= b[0] + b[2],
               f"lbl.x={lb[0]} 按钮右缘={b[0]+b[2]}")
         cv = bx(app.canvas_box)
         check("画布位于操作条下方", cv[1] >= b[1] + b[3],

@@ -60,7 +60,9 @@ class MaskCanvas(tk.Frame):
     """
 
     def __init__(self, master, app: "MosaicApp"):
-        super().__init__(master, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        # 不画外框线：让画布与所在卡片融为一体，避免出现「深色区被框住」的割裂感
+        super().__init__(master, bg=CARD, highlightbackground=CARD,
+                         highlightthickness=0)
         self.app = app
         self.image: tk.PhotoImage | None = None
         self.img_w = 0
@@ -88,9 +90,15 @@ class MaskCanvas(tk.Frame):
         # 之前固定 crosshair，在空白处按住拖会像"禁止"一样没反应。
         self.canvas = tk.Canvas(self, bg="#1a1d21", highlightthickness=0,
                                 height=340, cursor="crosshair")
-        self.canvas.pack(fill="both", expand=True, padx=8, pady=8)
+        # 不留内边距：画布本身就是一整块深色区域，槽位卡画在它上面。
+        # 之前留了 8px 白边，会把「黑色视频区」和卡片区割成两块。
+        self.canvas.pack(fill="both", expand=True, padx=0, pady=0)
 
         self.canvas.bind("<Configure>", lambda e: self._redraw())
+        # hover 用来让鼠标经过时 current 标签生效，_on_press 才能识别出
+        # 点在哪个删除按钮上（Canvas 的 current 标签依赖鼠标悬停）。
+        self.canvas.bind("<Motion>", self._on_motion)
+        self.canvas.bind("<Leave>", lambda e: self.canvas.delete("hover"))
         self.canvas.bind("<Button-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
@@ -258,13 +266,23 @@ class MaskCanvas(tk.Frame):
                 fill=SLOT_TEXT, font=("Microsoft YaHei UI", 10, "bold"))
             if s.filled:
                 name = s.file.name if s.file else ""
-                # 文件名可能很长，尾部省略避免溢出卡片
+                # 文件名可能很长，两端省略避免溢出卡片
                 shown = name if len(name) <= 18 else name[:8] + "…" + name[-8:]
                 self.canvas.create_text(
-                    s.x + s.w / 2, s.y + s.h / 2 + 12, text=shown,
+                    s.x + s.w / 2, s.y + s.h / 2 + 10, text=shown,
                     fill="#8fd6ae", font=("Microsoft YaHei UI", 9))
+                # 右上角画一个显眼的删除按钮：
+                # 只靠右键移除太隐蔽，用户拖错了视频很难发现能删。
+                bx, by, br = s.x + s.w - 18, s.y + 18, 11
+                self.canvas.create_oval(
+                    bx - br, by - br, bx + br, by + br,
+                    fill="#c0392b", outline="#e74c3c", width=1,
+                    tags=("slot_del", f"slot_{s.index}"))
                 self.canvas.create_text(
-                    s.x + s.w / 2, s.y + s.h - 12, text="右键移除",
+                    bx, by, text="✕", fill="#ffffff",
+                    font=("Segoe UI", 9, "bold"), tags=("slot_del", f"slot_{s.index}"))
+                self.canvas.create_text(
+                    s.x + s.w / 2, s.y + s.h - 14, text="拖走可换· 点 ✕ 移除",
                     fill=SLOT_SUB, font=("Microsoft YaHei UI", 8))
             else:
                 self.canvas.create_text(
@@ -332,7 +350,39 @@ class MaskCanvas(tk.Frame):
                                     fill="#ffd166", font=("Microsoft YaHei UI", 8, "bold"))
 
     # ---------- 鼠标交互 ----------
+    def _on_motion(self, _event=None) -> None:
+        """鼠标移动时给删除按钮加高亮（顺带让 current 标签生效）。"""
+        self.canvas.delete("hover")
+        for item in self.canvas.find_overlapping(
+                self.canvas.winfo_pointerx() - self.canvas.winfo_rootx(),
+                self.canvas.winfo_pointery() - self.canvas.winfo_rooty(),
+                self.canvas.winfo_pointerx() - self.canvas.winfo_rootx(),
+                self.canvas.winfo_pointery() - self.canvas.winfo_rooty()):
+            for tag in self.canvas.gettags(item):
+                if tag.startswith("slot_"):
+                    self.canvas.addtag_withtag("hover", item)
+
+    def _remove_slot_by_index(self, idx: int) -> None:
+        """按序号移除槽位并通知 app 同步列表。"""
+        if not (0 <= idx < len(self.slots)):
+            return
+        slot = self.slots[idx]
+        self.remove_slot(slot)
+        if hasattr(self.app, "on_slot_removed"):
+            self.app.on_slot_removed(slot)
+
     def _on_press(self, event) -> None:
+        # 先判槽位卡的删除按钮。必须在「没有预览图」的早退之前处理 ——
+        # 否则空状态点✕ 毫无反应。
+        hit = self.canvas.find_withtag("current")
+        if hit:
+            for item in hit:
+                for tag in self.canvas.gettags(item):
+                    if tag.startswith("slot_"):
+                        idx = int(tag.split("_", 1)[1])
+                        self._remove_slot_by_index(idx)
+                        return "break"
+
         if not self.image:
             return
         # 点在已有框上则选中，否则开始新框

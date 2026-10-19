@@ -54,7 +54,7 @@ def main() -> int:
     print("\n== 2. 不该有任何占位文案 ==")
     all_text = " ".join([
         app.lbl_prog.cget("text"), app.lbl_done.cget("text"),
-        app.lbl_src.cget("text"), app.lbl_hint.cget("text"),
+        app.lbl_status.cget("text"), app.lbl_hint.cget("text"),
         app.player_bar.lbl_time.cget("text"),
     ])
     check("无「就绪」字样", "就绪" not in all_text, all_text.strip()[:70])
@@ -78,8 +78,8 @@ def main() -> int:
 
     print("\n== 4. 空画布给出可操作指引（这是该显示的）==")
     check("画布无图", app.canvas_box.image is None)
-    check("文件名显示「未选择文件」",
-          app.lbl_src.cget("text") == "未选择文件", app.lbl_src.cget("text"))
+    check("顶栏状态位为空（不再显示「未选择文件」）",
+          app.lbl_status.cget("text") == "", app.lbl_status.cget("text"))
 
     print("\n== 5. 载入文件后应恢复显示 ==")
     src = require_sample()

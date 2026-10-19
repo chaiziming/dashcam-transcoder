@@ -164,8 +164,25 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
                   style="Muted.TLabel").grid(row=1, column=0, columnspan=2, sticky="w")
 
     def _build_left(self, parent) -> None:
-        card = ttk.Frame(parent, style="Card.TFrame", padding=12)
-        card.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        # 左侧整体也套一层滚动：窗口调小时画布+播放条不会把内容顶出可视区。
+        wrap = ttk.Frame(parent, style="Card.TFrame")
+        wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+
+        self.left_canvas = tk.Canvas(wrap, bg=CARD, highlightthickness=0,
+                                     bd=0)
+        self.left_canvas.grid(row=0, column=0, sticky="nsew")
+        self._left_sb = ttk.Scrollbar(wrap, orient="vertical",
+                                       command=self.left_canvas.yview)
+        self._left_sb.grid(row=0, column=1, sticky="ns")
+        self.left_canvas.configure(yscrollcommand=self._left_sb.set)
+
+        card = ttk.Frame(self.left_canvas, style="Card.TFrame", padding=12)
+        self._left_window = self.left_canvas.create_window(
+            (0, 0), window=card, anchor="nw")
+        self._bind_scroll(self.left_canvas, card, self._left_window,
+                          self._left_sb, "left")
         card.columnconfigure(0, weight=1)
         # 画布在 row=1，只有它需要吃掉多余高度；顶部操作条 row=0、
         # 播放控制条 row=2 各占一行，都不该被拉伸。
@@ -189,11 +206,11 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         # 已添加的待合并视频（合并顺序 = 添加顺序），最多 MAX_MERGE 个。
         self.preview_files: list[Path] = []
 
-        # 原来的「换帧预览」按钮已移除：进度条拖拽 + 快进快退已能覆盖同样的需求，
-        # 而且它原本直接解码原始裸流，点了会很慢。
-        self.lbl_src = ttk.Label(top, text="未选择文件", style="Muted.TLabel",
-                                 anchor="w")
-        self.lbl_src.grid(row=0, column=1, sticky="ew", padx=(10, 6))
+        # 顶栏状态位：替代原来那个「未选择文件」标签。
+        # 只在有内容时说点什么，平时留空不占视觉。
+        self.lbl_status = ttk.Label(top, text="", style="Muted.TLabel",
+                                    anchor="w")
+        self.lbl_status.grid(row=0, column=1, sticky="ew", padx=(10, 6))
 
         # --- 预览画布 ---
         # 控制条放在画布**下方**（主流播放器都是控制条在下），
@@ -228,15 +245,13 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         sb.grid(row=0, column=1, sticky="ns")
         self._side_sb = sb
         self.side_canvas.configure(yscrollcommand=sb.set)
-        # 鼠标滚轮直接滚右侧面板
-        self.side_canvas.bind("<MouseWheel>", self._on_side_wheel)
 
         side = ttk.Frame(self.side_canvas, style="Card.TFrame", padding=12)
         self._side_inner = side
         self.side_window = self.side_canvas.create_window(
             (0, 0), window=side, anchor="nw")
-        # 内部宽度跟随画布宽度，否则横向会出现难看的空白
-        self.side_canvas.bind("<Configure>", self._on_side_configure)
+        self._bind_scroll(self.side_canvas, side, self.side_window,
+                          sb, "side")
         side.columnconfigure(0, weight=1)
 
         r = 0
@@ -404,40 +419,71 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
                   style="Muted.TLabel").grid(row=r, column=0, sticky="w", pady=(2, 0))
         r += 1
 
-    # ---------- 右侧面板滚动 ----------
-    def _on_side_configure(self, event) -> None:
-        """画布尺寸变化时同步内部面板宽度，并按需显隐滚动条。"""
-        self.side_canvas.itemconfigure(self.side_window, width=event.width)
-        self._sync_side_scroll()
+    # ---------- 左右面板滚动（同一套逻辑，参数化）----------
+    def _bind_scroll(self, canvas: tk.Canvas, inner, window, sb,
+                     attr_prefix: str) -> None:
+        """给一块 Canvas + 内部 Frame 装上纵向滚动。
 
-    def _sync_side_scroll(self) -> None:
-        """内容高<= 视口高时隐藏滚动条，反之显示。"""
+        抽成通用方法是因为左右两侧的需求完全一样，只是变量名不同。
+        存到 self 上供后续事件回调使用。
+        """
+        def on_configure(event) -> None:
+            # 宽度跟着画布走，否则横向会留出难看的空白。
+            # scrollregion 必须显式设置：Canvas 不会因为嵌窗口超出视口就
+            # 自动开启滚动，缺了它 yview 恒为 (0,1)，滚动条形同虚设
+            #（表现为「有滚动条但拖不动」）。
+            req_h = inner.winfo_reqheight()
+            inner_h = req_h if req_h > 1 else event.height
+            canvas.itemconfigure(window, width=event.width, height=inner_h)
+            canvas.configure(scrollregion=(0, 0, event.width, inner_h))
+            self._sync_scroll(attr_prefix)
+
+        def on_wheel(e):
+            try:
+                inner_h = inner.winfo_reqheight()
+                view_h = canvas.winfo_height()
+            except tk.TclError:
+                return
+            if inner_h <= view_h:
+                return              # 内容不满一屏，放行让外层滚
+            delta = -int(e.delta / 120) if e.delta else 0
+            if delta:
+                canvas.yview_scroll(delta, "units")
+            return "break"         # 拦截，避免冒泡
+
+        canvas.bind("<Configure>", on_configure)
+        canvas.bind("<MouseWheel>", on_wheel)
+        setattr(self, f"_{attr_prefix}_canvas", canvas)
+        setattr(self, f"_{attr_prefix}_inner", inner)
+        setattr(self, f"_{attr_prefix}_sb", sb)
+
+    def _sync_scroll(self, prefix: str) -> None:
+        """按内容高度显隐滚动条，并在不需要时复位滚动位置。
+
+        窗口放大后内容可能不再超出视口，这时要把 scrollregion 收回，
+        否则 Canvas 会一直保留旧的滚动区间，滚轮还会把内容推走。
+        """
+        canvas = getattr(self, f"_{prefix}_canvas")
+        inner = getattr(self, f"_{prefix}_inner")
+        sb = getattr(self, f"_{prefix}_sb")
         try:
-            inner_h = self._side_inner.winfo_reqheight()
-            view_h = self.side_canvas.winfo_height()
+            view_h = canvas.winfo_height()
+            need = inner.winfo_reqheight() > view_h + 2
         except tk.TclError:
             return
-        need = inner_h > view_h + 2
-        if need and not self._side_sb.winfo_ismapped():
-            self._side_sb.grid()
-        elif not need and self._side_sb.winfo_ismapped():
-            self._side_sb.grid_remove()
-        self.side_canvas.configure(
-            yscrollcommand=self._side_sb.set if need else "")
-
-    def _on_side_wheel(self, e) -> None:
-        """滚轮滚动右侧面板。"""
-        try:
-            inner_h = self._side_inner.winfo_reqheight()
-            view_h = self.side_canvas.winfo_height()
-        except tk.TclError:
-            return
-        if inner_h <= view_h:
-            return                      # 内容不满一屏，交给外层滚动
-        delta = -int(e.delta / 120) if e.delta else 0
-        if delta:
-            self.side_canvas.yview_scroll(delta, "units")
-        return "break"                 # 阻止继续冒泡滚外层
+        if need:
+            if not sb.winfo_ismapped():
+                sb.grid()
+            canvas.configure(yscrollcommand=sb.set)
+        else:
+            if sb.winfo_ismapped():
+                sb.grid_remove()
+            # 清空 yscrollcommand，否则 Canvas 仍会按旧区间算滚动比例
+            canvas.configure(yscrollcommand="")
+            try:
+                canvas.yview_moveto(0)
+            except tk.TclError:
+                pass
 
     def _build_footer(self) -> None:
         foot = ttk.Frame(self, padding=(12, 8, 12, 12))

@@ -54,19 +54,22 @@ class MergeListMixin:
                 else f"共 {total}/{self.MAX_MERGE} 个，将按顺序合并 {on} 个")
 
     def _refresh_preview_bar(self) -> None:
-        """更新顶部的源文件提示条。"""
-        if not hasattr(self, "lbl_src"):
-            return
+        """刷新合并状态提示。
+
+        顶栏的「未选择文件」标签已移除（画面里的槽位卡已能表达状态），
+        这里改为写入状态栏，让用户知道当前待合并/当前预览的是哪个。
+        """
         n = len(self.preview_files)
         if n == 0:
-            self.lbl_src.config(text="未选择文件")
-            return
-        names = "、".join(f.name for f in self.preview_files[:3])
-        more = f" 等 {n} 个" if n > 3 else ""
-        cur = self.src.name if getattr(self, "src", None) else ""
-        self.lbl_src.config(
-            text=f"待合并 {n} 个：{names}{more}"
-                 + (f"   （当前：{cur}）" if cur else ""))
+            text = "尚未加入待合并视频"
+        else:
+            cur = self.src.name if getattr(self, "src", None) else ""
+            on = len(self._merge_targets())
+            text = f"待合并 {n} 个" + (f"，当前预览：{cur}" if cur else "")
+            if on != n:
+                text += f"（{n - on} 个已取消勾选）"
+        if hasattr(self, "lbl_status"):
+            self.lbl_status.config(text=text)
 
     # ---------- 交互 ----------
 
