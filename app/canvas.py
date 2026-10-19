@@ -13,9 +13,41 @@
 from __future__ import annotations
 
 import tkinter as tk
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from .mask import MaskRegion
 from .theme import ACCENT, BORDER, CARD
+
+# 槽位卡配色
+SLOT_BG = "#23282f"
+SLOT_EMPTY_BG = "#2b3138"
+SLOT_EDGE = "#4a5460"
+SLOT_TEXT = "#c3cbd6"
+SLOT_SUB = "#8b95a3"
+SLOT_FILLED = "#1f4d33"       # 已填文件的卡片底色
+SLOT_FILLED_EDGE = "#3f9e6b"
+
+
+@dataclass
+class SlotCard:
+    """一个待合并视频的槽位（画面上的一片区域）。
+
+    点「添加视频」开出一个空槽，把文件拖到它上面就填进来。
+    file 为 None 表示空槽。
+    """
+
+    index: int                       # 第几个（0 起）
+    file: Path | None = None
+    # 显示坐标（Canvas 像素）。每帧按画布大小重算，见 _layout_slots。
+    x: float = 0.0
+    y: float = 0.0
+    w: float = 0.0
+    h: float = 0.0
+
+    @property
+    def filled(self) -> bool:
+        return self.file is not None
 
 
 class MaskCanvas(tk.Frame):
@@ -38,6 +70,10 @@ class MaskCanvas(tk.Frame):
         self.offset_y = 0
 
         self.regions: list[MaskRegion] = []
+        # 待合并视频的槽位卡：点「添加视频」就在画面上开一片空白区域，
+        # 把文件拖到某张卡上即加入该槽位。比弹框选文件更直观，
+        # 也能一眼看出「第几段」。
+        self.slots: list[SlotCard] = []
         self._drag_from: tuple[float, float] | None = None
         self._drag_now: tuple[float, float] | None = None
         self._active_idx: int | None = None
@@ -129,15 +165,126 @@ class MaskCanvas(tk.Frame):
             return vx * (self.img_w / self.video_w), vy * (self.img_h / self.video_h)
         return vx, vy
 
+    # ---------- 槽位卡 ----------
+    def _layout_slots(self) -> None:
+        """按画布大小重排所有槽位卡的位置。
+
+        有预览图时压在画面下方一行；无图时铺成 2x2 网格，
+        最大化可放置面积。
+        """
+        cw = max(1, self.canvas.winfo_width())
+        ch = max(1, self.canvas.winfo_height())
+        n = len(self.slots)
+        if not n:
+            return
+
+        if self.image:
+            # 有画面：在画面下方留一条，卡片按数量均分宽度
+            band_h = max(56.0, ch * 0.18)
+            gap = 8.0
+            cw_each = (cw - gap * (n + 1)) / n
+            cw_each = max(72.0, min(cw_each, 240.0))
+            total = cw_each * n + gap * (n - 1)
+            x0 = (cw - total) / 2
+            y0 = ch - band_h
+            for i, s in enumerate(self.slots):
+                s.w = cw_each
+                s.h = band_h - 10
+                s.x = x0 + i * (cw_each + gap)
+                s.y = y0 + 5
+        else:
+            # 无画面：2x2 网格居中
+            cols = 2 if n > 1 else 1
+            rows = (n + cols - 1) // cols
+            gap = 14.0
+            cw_each = min((cw - gap * (cols + 1)) / cols, 300.0)
+            ch_each = min((ch - gap * (rows + 1)) / rows, 190.0)
+            grid_w = cw_each * cols + gap * (cols - 1)
+            grid_h = ch_each * rows + gap * (rows - 1)
+            x0 = (cw - grid_w) / 2
+            y0 = (ch - grid_h) / 2
+            for i, s in enumerate(self.slots):
+                r, c = divmod(i, cols)
+                s.w = cw_each
+                s.h = ch_each
+                s.x = x0 + c * (cw_each + gap)
+                s.y = y0 + r * (ch_each + gap)
+
+    def slot_at(self, x: float, y: float) -> SlotCard | None:
+        """命中测试：坐标落在哪张槽位卡上。"""
+        for s in reversed(self.slots):
+            if s.x <= x <= s.x + s.w and s.y <= y <= s.y + s.h:
+                return s
+        return None
+
+    def add_slot(self, file: Path | None = None) -> SlotCard:
+        """新增一个槽位并返回。"""
+        s = SlotCard(index=len(self.slots), file=file)
+        self.slots.append(s)
+        self._redraw()
+        return s
+
+    def remove_slot(self, slot: SlotCard) -> None:
+        if slot in self.slots:
+            self.slots.remove(slot)
+        for i, s in enumerate(self.slots):
+            s.index = i
+        self._redraw()
+
+    def clear_slots(self) -> None:
+        self.slots.clear()
+        self._redraw()
+
+    def fill_slot(self, slot: SlotCard, file: Path) -> None:
+        """把文件放进指定槽位（若已满则返回 False）。"""
+        slot.file = file
+        self._redraw()
+
+    def _draw_slots(self) -> None:
+        """画所有槽位卡。"""
+        if not self.slots:
+            return
+        for s in self.slots:
+            bg = SLOT_FILLED if s.filled else SLOT_EMPTY_BG
+            edge = SLOT_FILLED_EDGE if s.filled else SLOT_EDGE
+            self.canvas.create_rectangle(
+                s.x, s.y, s.x + s.w, s.y + s.h,
+                fill=bg, outline=edge, width=2,
+                dash=None if s.filled else (6, 4),
+                tags="slot")
+            label = f"第 {s.index + 1} 段"
+            self.canvas.create_text(
+                s.x + s.w / 2, s.y + s.h / 2 - 12, text=label,
+                fill=SLOT_TEXT, font=("Microsoft YaHei UI", 10, "bold"))
+            if s.filled:
+                name = s.file.name if s.file else ""
+                # 文件名可能很长，尾部省略避免溢出卡片
+                shown = name if len(name) <= 18 else name[:8] + "…" + name[-8:]
+                self.canvas.create_text(
+                    s.x + s.w / 2, s.y + s.h / 2 + 12, text=shown,
+                    fill="#8fd6ae", font=("Microsoft YaHei UI", 9))
+                self.canvas.create_text(
+                    s.x + s.w / 2, s.y + s.h - 12, text="右键移除",
+                    fill=SLOT_SUB, font=("Microsoft YaHei UI", 8))
+            else:
+                self.canvas.create_text(
+                    s.x + s.w / 2, s.y + s.h / 2 + 14, text="把视频拖到这里",
+                    fill=SLOT_SUB, font=("Microsoft YaHei UI", 9))
+
     # ---------- 绘制 ----------
     def _redraw(self) -> None:
         self.canvas.delete("all")
         self._fit()
-        if not self.image:
+        if not self.image and not self.slots:
             self.canvas.create_text(
                 self.canvas.winfo_width() / 2, self.canvas.winfo_height() / 2,
-                text="把 .h264 文件拖到这里\n或点左上角「选择视频文件…」",
+                text="把视频拖到这里",
                 fill="#9aa5b4", font=("Microsoft YaHei UI", 11), justify="center")
+            return
+        if not self.image:
+            # 还没有预览帧，但已经有槽位了 —— 只画卡片即可
+            self._layout_slots()
+            self._draw_slots()
             return
 
         x0, y0 = self._to_display(0, 0)
@@ -166,6 +313,10 @@ class MaskCanvas(tk.Frame):
             bx, by = self._to_display(dx + dw, dy + dh)
             self.canvas.create_rectangle(ax - 2, ay - 2, bx + 2, by + 2,
                                          outline="#ffd166", width=2)
+
+        # 槽位卡画在最上层，否则会被画面或遮挡框盖住
+        self._layout_slots()
+        self._draw_slots()
 
     def _draw_region(self, r: MaskRegion, label: str) -> None:
         # r 的坐标是视频真实像素，画在代理图上要按比例缩放
@@ -243,7 +394,17 @@ class MaskCanvas(tk.Frame):
         self.app.on_regions_changed()
 
     def _on_right_click(self, event) -> None:
-        """右键删除点击到的框。"""
+        """右键：优先删槽位卡，其次删遮挡框。
+
+        槽位画在上层，所以要先判槽位 —— 否则点卡片会误删下面的遮挡框。
+        """
+        slot = self.slot_at(event.x, event.y)
+        if slot is not None:
+            self.remove_slot(slot)
+            if hasattr(self.app, "on_slot_removed"):
+                self.app.on_slot_removed(slot)
+            return
+
         for i, r in enumerate(self.regions):
             dx, dy = self._video_to_display_len(r.x, r.y)
             dw, dh = self._video_to_display_len(r.w, r.h)

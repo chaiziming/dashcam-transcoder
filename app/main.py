@@ -212,8 +212,30 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.lbl_hint.grid(row=3, column=0, sticky="w", pady=(6, 0))
 
     def _build_right(self, parent) -> None:
-        side = ttk.Frame(parent, style="Card.TFrame", padding=12)
-        side.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        # 右侧内容多时窗口装不下，整块套一层 Canvas 做纵向滚动：
+        # 滚动条跟着内容高度走，内容不满一屏时自动隐藏。
+        wrap = ttk.Frame(parent, style="Card.TFrame")
+        wrap.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+
+        self.side_canvas = tk.Canvas(wrap, bg=CARD, highlightthickness=0,
+                                     bd=0)
+        self.side_canvas.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(wrap, orient="vertical",
+                           command=self.side_canvas.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        self._side_sb = sb
+        self.side_canvas.configure(yscrollcommand=sb.set)
+        # 鼠标滚轮直接滚右侧面板
+        self.side_canvas.bind("<MouseWheel>", self._on_side_wheel)
+
+        side = ttk.Frame(self.side_canvas, style="Card.TFrame", padding=12)
+        self._side_inner = side
+        self.side_window = self.side_canvas.create_window(
+            (0, 0), window=side, anchor="nw")
+        # 内部宽度跟随画布宽度，否则横向会出现难看的空白
+        self.side_canvas.bind("<Configure>", self._on_side_configure)
         side.columnconfigure(0, weight=1)
 
         r = 0
@@ -225,19 +247,19 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.lbl_info.grid(row=r, column=0, sticky="w", pady=(0, 10))
         r += 1
 
-        # --- 待合并视频（最多 4 个，按列表顺序合成）---
-        ttk.Label(side, text=f"待合并视频（最多 {self.MAX_MERGE} 个，按顺序拼接）",
+        # --- 待合并视频（最多 4 个，按槽位顺序拼接）---
+        ttk.Label(side, text=f"待合并视频（最多 {self.MAX_MERGE} 个）",
                   style="Section.TLabel").grid(row=r, column=0, sticky="w",
                                                 pady=(0, 4))
         r += 1
         self.lbl_list_hint = ttk.Label(
-            side, text="点「添加视频」或直接拖文件进来",
+            side, text="点「添加视频」开空位，把视频拖进卡片",
             style="Muted.TLabel")
         self.lbl_list_hint.grid(row=r, column=0, sticky="w", pady=(0, 4))
         r += 1
 
         self.lst_files = tk.Listbox(
-            side, height=4, font=("Consolas", 9), activestyle="none",
+            side, height=3, font=("Consolas", 9), activestyle="none",
             highlightthickness=1, highlightbackground=BORDER, borderwidth=0,
             selectbackground="#dce8fb", selectforeground=FG)
         self.lst_files.grid(row=r, column=0, sticky="ew", pady=(2, 4))
@@ -248,7 +270,7 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         frow.grid(row=r, column=0, sticky="ew", pady=(0, 10))
         ttk.Button(frow, text="移除选中", command=self.on_remove_file).pack(
             side="left")
-        ttk.Button(frow, text="清空列表",
+        ttk.Button(frow, text="清空",
                    command=self.on_clear_files).pack(side="left", padx=(6, 0))
         r += 1
 
@@ -380,6 +402,41 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         ttk.Label(side, text="CRF 越小越清晰、体积越大；举报材料建议 21",
                   style="Muted.TLabel").grid(row=r, column=0, sticky="w", pady=(2, 0))
         r += 1
+
+    # ---------- 右侧面板滚动 ----------
+    def _on_side_configure(self, event) -> None:
+        """画布尺寸变化时同步内部面板宽度，并按需显隐滚动条。"""
+        self.side_canvas.itemconfigure(self.side_window, width=event.width)
+        self._sync_side_scroll()
+
+    def _sync_side_scroll(self) -> None:
+        """内容高<= 视口高时隐藏滚动条，反之显示。"""
+        try:
+            inner_h = self._side_inner.winfo_reqheight()
+            view_h = self.side_canvas.winfo_height()
+        except tk.TclError:
+            return
+        need = inner_h > view_h + 2
+        if need and not self._side_sb.winfo_ismapped():
+            self._side_sb.grid()
+        elif not need and self._side_sb.winfo_ismapped():
+            self._side_sb.grid_remove()
+        self.side_canvas.configure(
+            yscrollcommand=self._side_sb.set if need else "")
+
+    def _on_side_wheel(self, e) -> None:
+        """滚轮滚动右侧面板。"""
+        try:
+            inner_h = self._side_inner.winfo_reqheight()
+            view_h = self.side_canvas.winfo_height()
+        except tk.TclError:
+            return
+        if inner_h <= view_h:
+            return                      # 内容不满一屏，交给外层滚动
+        delta = -int(e.delta / 120) if e.delta else 0
+        if delta:
+            self.side_canvas.yview_scroll(delta, "units")
+        return "break"                 # 阻止继续冒泡滚外层
 
     def _build_footer(self) -> None:
         foot = ttk.Frame(self, padding=(12, 8, 12, 12))
@@ -513,26 +570,18 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
             self.lbl_done.grid_remove()
 
     def on_add_video(self) -> None:
-        """选视频加入合并列表（最多 MAX_MERGE 个，按添加顺序合成）。
+        """在画面上开一个空槽位，把视频拖进去即可加入合并。
 
-        也可以直接把文件拖进窗口，那边的上限与这里一致。
+        不用弹框选文件：弹框选完还得自己记哪个是第几段，
+        直接在画面上开卡片更直观 —— 第几段、拖了什么、要不要删，
+        一眼就清楚。上限 MAX_MERGE 个。
         """
-        MAX_VIDEOS = self.MAX_MERGE
-        room = MAX_VIDEOS - len(self.preview_files)
-        if room <= 0:
-            self._notify(f"最多合并 {MAX_VIDEOS} 个视频，请先移除一个再添加")
+        if len(self.canvas_box.slots) >= self.MAX_MERGE:
+            self._notify(f"最多合并 {self.MAX_MERGE} 个视频，"
+                         "右键点卡片可移除一个")
             return
-
-        start_dir = self.cfg.get("last_dir") or str(Path.home())
-        paths = filedialog.askopenfilenames(
-            title=f"选择要合并的视频（还可添加 {room} 个）",
-            initialdir=start_dir,
-            filetypes=[("视频文件", " ".join(f"*{e}" for e in VIDEO_EXTS)),
-                       ("h264 裸流", "*.h264"), ("所有文件", "*.*")])
-        if not paths:
-            return
-        # 选超额了只取前 room 个，并提示丢了几个
-        self._add_files([Path(p) for p in paths][:room], limit=MAX_VIDEOS)
+        self.canvas_box.add_slot()
+        self._refresh_file_list()
 
     def _add_files(self, paths: list[Path], *, limit: int | None = None) -> None:
         """把视频加入合并列表（去重、按上限截断），并刷新列表显示。"""
@@ -1023,22 +1072,68 @@ class MosaicApp(TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.canvas_box.set_drop_highlight(False)
 
     def on_drop(self, event) -> None:
-        """拖入的文件加入合并列表（按拖入顺序），首个自动载入主画面。"""
+        """拖入的视频填进对应槽位。
+
+        - 拖到某张空卡片上 -> 填进那个槽位
+        - 拖到空白处-> 填进第一个空槽，没有空槽就自动开一个新槽
+        合并顺序 = 槽位顺序（第1 张卡= 第 1 段）。
+        """
         self.canvas_box.set_drop_highlight(False)
         try:
             data = event.data
             paths = self.tk.splitlist(data) if isinstance(data, str) else list(data)
         except (tk.TclError, AttributeError, TypeError):
             return
-        videos: list[Path] = []
-        for raw in paths:
-            p = Path(str(raw).strip("{}"))
-            if p.suffix.lower() in VIDEO_EXTS and p.is_file():
-                videos.append(p)
+        videos = [Path(str(raw).strip("{}")) for raw in paths
+                  if Path(str(raw).strip("{}")).suffix.lower() in VIDEO_EXTS
+                  and Path(str(raw).strip("{}")).is_file()]
         if not videos:
             self._notify("拖入的文件不是支持的视频格式")
             return
-        self._add_files(videos)
+
+        # 用事件坐标判断落在哪张卡上（Canvas 内坐标）
+        card = self.canvas_box.slot_at(event.x, event.y) \
+            if getattr(event, "x", None) is not None else None
+        if card is not None and not card.filled:
+            self.canvas_box.fill_slot(card, videos[0])
+            self._sync_slots_to_list()
+            # 第一个填入的视频自动载入主画面
+            if self.src is None:
+                self.load_file(card.file)
+            else:
+                self._refresh_file_list()
+            if len(videos) > 1:
+                self._notify("一张卡只放一个视频，其余已忽略")
+            return
+
+        # 落在空白处：找空槽，没有就自动开一个
+        for v in videos:
+            empty = next((s for s in self.canvas_box.slots if not s.filled), None)
+            if empty is None:
+                if len(self.canvas_box.slots) >= self.MAX_MERGE:
+                    self._notify(f"最多合并 {self.MAX_MERGE} 个视频")
+                    break
+                empty = self.canvas_box.add_slot()
+            self.canvas_box.fill_slot(empty, v)
+
+        self._sync_slots_to_list()
+        if self.src is None and self.preview_files:
+            self.load_file(self.preview_files[0])
+
+    def _sync_slots_to_list(self) -> None:
+        """把槽位内容同步到 preview_files（跳过空槽，保持槽位顺序）。"""
+        self.preview_files = [s.file for s in self.canvas_box.slots
+                              if s.filled and s.file is not None]
+        self._refresh_file_list()
+
+    def on_slot_removed(self, slot) -> None:
+        """槽位被右键移除后同步列表。"""
+        self._sync_slots_to_list()
+        # 移除的正好是当前预览的文件 -> 换成剩余的第一个
+        if slot.filled and getattr(self, "src", None) == slot.file:
+            self.src = None
+            if self.preview_files:
+                self.load_file(self.preview_files[0])
 
     def _bind_player_keys(self) -> None:
         """键盘快捷键（全局绑定到窗口）。"""
