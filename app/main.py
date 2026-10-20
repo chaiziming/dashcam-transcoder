@@ -164,25 +164,11 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
                   style="Muted.TLabel").grid(row=1, column=0, columnspan=2, sticky="w")
 
     def _build_left(self, parent) -> None:
-        # 左侧整体也套一层滚动：窗口调小时画布+播放条不会把内容顶出可视区。
-        wrap = ttk.Frame(parent, style="Card.TFrame")
-        wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        wrap.rowconfigure(0, weight=1)
-        wrap.columnconfigure(0, weight=1)
-
-        self.left_canvas = tk.Canvas(wrap, bg=CARD, highlightthickness=0,
-                                     bd=0)
-        self.left_canvas.grid(row=0, column=0, sticky="nsew")
-        self._left_sb = ttk.Scrollbar(wrap, orient="vertical",
-                                       command=self.left_canvas.yview)
-        self._left_sb.grid(row=0, column=1, sticky="ns")
-        self.left_canvas.configure(yscrollcommand=self._left_sb.set)
-
-        card = ttk.Frame(self.left_canvas, style="Card.TFrame", padding=12)
-        self._left_window = self.left_canvas.create_window(
-            (0, 0), window=card, anchor="nw")
-        self._bind_scroll(self.left_canvas, card, self._left_window,
-                          self._left_sb, "left")
+        # 左侧不加滚动条：内容高度是固定的（画布有最小高度），
+        # 套滚动容器会失去「随窗口拉伸」的能力，导致画布撑不满、
+        # 底部留出空白。真正会超出的是右侧面板，那边才需要滚动。
+        card = ttk.Frame(parent, style="Card.TFrame", padding=12)
+        card.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         card.columnconfigure(0, weight=1)
         # 画布在 row=1，只有它需要吃掉多余高度；顶部操作条 row=0、
         # 播放控制条 row=2 各占一行，都不该被拉伸。
