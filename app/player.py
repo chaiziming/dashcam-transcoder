@@ -117,6 +117,52 @@ def ensure_proxy(
     return out
 
 
+def extract_thumbnail(ffmpeg: str, source: Path, out_path: Path,
+                      at_sec: float = 0.0) -> Path | None:
+    """从视频里抽一帧存成 PNG（缩略图）。
+
+    用途：非激活的画布要显示「各自的首帧静帧」。
+    用 PNG 而不是原始尺寸，是因为代理图本身就是 640x360 的小图，
+    抽出来的首帧也按 640x360 存，显示时缩放开销小。
+
+    注意 tk.PhotoImage(file=...) 在 Tk 8.6 下原生支持 PNG，
+    所以这里不需要额外引入 Pillow。
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
+    if Path(source).suffix.lower() in {".h264", ".avc"}:
+        cmd += ["-f", "h264"]
+    if at_sec > 0:
+        cmd += ["-ss", f"{at_sec:.3f}"]
+    cmd += ["-i", str(source), "-frames:v", "1", "-vf", "scale=640:360",
+            "-pix_fmt", "rgb24", str(out_path)]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.name == "nt" else 0
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=120,
+                              creationflags=flags)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not out_path.is_file():
+        return None
+    return out_path
+
+
+def thumb_path_for(source: Path) -> Path:
+    """缩略图存放路径：临时目录 + 源文件名哈希。"""
+    import hashlib
+    import tempfile
+    try:
+        st = source.stat()
+        sig = f"{source.name}|{st.st_size}|{int(st.st_mtime)}"
+    except OSError:
+        sig = source.name
+    h = hashlib.md5(sig.encode("utf-8")).hexdigest()[:12]
+    d = Path(tempfile.gettempdir()) / "vin_mosaic_thumb"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{source.stem}_{h}.png"
+
+
 class FrameReader:
     """从代理文件持续读 PPM 帧的读取器（配合 FrameStream 使用）。"""
 

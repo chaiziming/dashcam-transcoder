@@ -51,6 +51,21 @@ class MaskRegion:
         return asdict(self)
 
 
+def scale_region(region: MaskRegion, src: tuple[int, int],
+                 dst: tuple[int, int]) -> MaskRegion:
+    """把一个遮挡区从 src 分辨率等比映射到 dst 分辨率。"""
+    x, y, w, h = scale_box((region.x, region.y, region.w, region.h), src, dst)
+    return MaskRegion(x, y, w, h, color=region.color, label=region.label)
+
+
+def scale_regions(regions: list[MaskRegion], src: tuple[int, int],
+                  dst: tuple[int, int]) -> list[MaskRegion]:
+    """批量把遮挡区映射到新分辨率（坐标基准与目标分辨率不一致时用）。"""
+    if not src or not dst or tuple(src) == tuple(dst):
+        return list(regions)
+    return [scale_region(r, src, dst) for r in regions]
+
+
 @dataclass
 class MaskPlan:
     """整段视频的遮挡方案。"""

@@ -165,9 +165,15 @@ def build_ui() -> None:
               f"btn={b} lbl={lb}")
         check("状态标签 位于按钮右侧", lb[0] >= b[0] + b[2],
               f"lbl.x={lb[0]} 按钮右缘={b[0]+b[2]}")
-        cv = bx(app.canvas_box)
-        check("画布位于操作条下方", cv[1] >= b[1] + b[3],
-              f"canvas.y={cv[1]} 操作条底={b[1]+b[3]}")
+        # 画布现在嵌在分段卡片里，坐标是相对卡片的，
+        # 必须换算到窗口绝对坐标才能和顶栏按钮比较。
+        cv_w = app.canvas_box
+        cv = (cv_w.winfo_rootx(), cv_w.winfo_rooty(),
+              cv_w.winfo_width(), cv_w.winfo_height())
+        btn_root_y = app.btn_choose.winfo_rooty()
+        btn_root_h = app.btn_choose.winfo_height()
+        check("画布位于操作条下方", cv[1] >= btn_root_y + btn_root_h,
+              f"canvas.rooty={cv[1]} 操作条底={btn_root_y + btn_root_h}")
         # 「换帧预览」按钮与「预览时间点」输入框已在 v5 移除（进度条拖拽已覆盖同样需求）
         check("「换帧预览」按钮已移除", not hasattr(app, "btn_preview"))
         check("「预览时间点」输入框已移除", not hasattr(app, "ent_ts"))

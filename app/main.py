@@ -31,12 +31,14 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import config, ffmpeg_env, packager
-from app.canvas import MaskCanvas
-from app.mask import EFFECT_LABELS, MaskPlan, MaskRegion, scale_box
+from app.canvas import SegmentCard
+from app.mask import EFFECT_LABELS, MaskPlan, MaskRegion, scale_box, scale_regions
 from app.merge_list import MergeListMixin
-from app.player import FrameReader, ProxySpec, ensure_proxy
+from app.player import (FrameReader, ProxySpec, ensure_proxy, extract_thumbnail,
+                        thumb_path_for)
 from app.player_bar import PlayerBar, hhmmss_ms
 from app.progress_bar import SegmentedProgress
+from app.segment import Segment
 from app.theme import (ACCENT, BG, BORDER, CARD, DANGER, FG, MUTED,
                        OK_GREEN, REF_H, REF_W, VIN_PRESET_BOX)
 from app.time_input import TimeInput
@@ -49,11 +51,11 @@ VIDEO_EXTS = (".h264", ".265", ".hevc", ".avc", ".mp4", ".m4v", ".avi", ".mov", 
 # 时间 format/parse 在 app/timeutil.py，控件在 app/time_input.py。
 
 
-
 class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
-    # 待合并视频的上限：行车记录仪分段录制通常 2~4 段，
-    # 更多的话逐段核对列表会变得很费劲，所以卡在 4 个。
-    MAX_MERGE = 4
+    # 待合并视频的上限：目前 2 个。
+    # 行车记录仪分段录制通常是 2 段；更多的话每个画布都要缩到很小，
+    # 框选车牌会变得困难（实测 2x2 四宫格下 VIN 条只有 3px 高，点不中）。
+    MAX_MERGE = 2
 
     def __init__(self) -> None:
         super().__init__()
@@ -66,16 +68,32 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.ffmpeg = ffmpeg_env.find_binary("ffmpeg")
         self.ffprobe = ffmpeg_env.find_binary("ffprobe")
 
-        self.src: Path | None = None
-        self.info: ffmpeg_env.VideoInfo | None = None
-        self.preview_png: Path | None = None
+        # ---- 分段（每段 = 一个独立画布）----
+        self.segments: list[Segment] = []
+        self.active_index: int = 0
+        # 画布卡片（UI 组件），与 segments 一一对应
+        self.cards: list[SegmentCard] = []
+        # 被取消勾选、不参与合并的段索引
+        self._files_disabled: set[int] = set()
+        # 右侧列表第 N 行 -> 段索引的映射
+        self._list_seg_map: list[int] = []
+
+        # ---- 全局共享的一套遮挡框 ----
+        # 所有画布共用同一份 regions，坐标基准是 (canon_w, canon_h)，
+        # 即「第一个载入的视频」的真实分辨率。这样即便两段视频分辨率不同，
+        # 同一个框在两段上落在相同的相对位置。
+        self.regions: list[MaskRegion] = []
+        self.canon_w: int = 0
+        self.canon_h: int = 0
+        # VIN 预设（以 canon 分辨率为基准）
         self.vin_box_real: tuple[int, int, int, int] = VIN_PRESET_BOX
+
         self.worker: threading.Thread | None = None
         self.cancel_event = threading.Event()
         self.busy = False
 
         # ---- 预览播放 ----
-        self.proxy: Path | None = None          # 代理预览文件
+        self.proxy: Path | None = None          # 当前段的代理预览文件
         self.reader: FrameReader | None = None  # 帧读取器
         self.playing = False
         self.position = 0.0                    # 当前播放位置（秒）
@@ -149,6 +167,9 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self._build_left(body)
         self._build_right(body)
         self._build_footer()
+        # 初始就有一个空画布：用户可以直接把视频拖进来，
+        # 不必先点「添加视频」。要第二段时再点按钮。
+        self.add_segment()
         self.on_regions_changed()
 
     def _build_header(self) -> None:
@@ -164,22 +185,23 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
                   style="Muted.TLabel").grid(row=1, column=0, columnspan=2, sticky="w")
 
     def _build_left(self, parent) -> None:
-        # 左侧不加滚动条：内容高度是固定的（画布有最小高度），
-        # 套滚动容器会失去「随窗口拉伸」的能力，导致画布撑不满、
-        # 底部留出空白。真正会超出的是右侧面板，那边才需要滚动。
+        # 左侧结构：
+        #   row0 顶部操作条（添加视频 / 合并 / 状态）
+        #   row1 画布区（Canvas + 内嵌 Frame，多个独立画布纵向排列，可滚动）
+        #   row2 播放控制条
+        #   row3 操作指引
+        # 画布区必须能滚动：两个画布纵向排列时高度会超出窗口。
         card = ttk.Frame(parent, style="Card.TFrame", padding=12)
         card.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         card.columnconfigure(0, weight=1)
-        # 画布在 row=1，只有它需要吃掉多余高度；顶部操作条 row=0、
-        # 播放控制条 row=2 各占一行，都不该被拉伸。
         card.rowconfigure(1, weight=1)
 
         # --- 顶部操作条 ---
         top = ttk.Frame(card, style="Card.TFrame")
         top.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         top.columnconfigure(1, weight=1)
-        # 选视频加进待合并列表；也可以直接拖文件进来。
-        # 上限 4 个：行车记录仪分段录制通常 2~4 段，太多不便于逐段确认。
+        # 「添加视频」= 再长出一个独立画布（上限 MAX_MERGE 个）。
+        # 视频靠拖放进画布，不用弹框选。
         self.btn_choose = ttk.Button(top, text="添加视频",
                                      command=self.on_add_video)
         self.btn_choose.grid(row=0, column=0, sticky="w")
@@ -189,20 +211,30 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.btn_merge.grid(row=0, column=2, sticky="e")
         self._sync_merge_btn()
 
-        # 已添加的待合并视频（合并顺序 = 添加顺序），最多 MAX_MERGE 个。
-        self.preview_files: list[Path] = []
-
         # 顶栏状态位：替代原来那个「未选择文件」标签。
         # 只在有内容时说点什么，平时留空不占视觉。
         self.lbl_status = ttk.Label(top, text="", style="Muted.TLabel",
                                     anchor="w")
         self.lbl_status.grid(row=0, column=1, sticky="ew", padx=(10, 6))
 
-        # --- 预览画布 ---
-        # 控制条放在画布**下方**（主流播放器都是控制条在下），
-        # 所以画布占 row=1、控制条占 row=2。
-        self.canvas_box = MaskCanvas(card, self)
-        self.canvas_box.grid(row=1, column=0, sticky="nsew")
+        # --- 画布区（可滚动）---
+        # 用 Canvas 承载内嵌 Frame：Frame 里纵向放若干 SegmentCard。
+        # Canvas 不会因为嵌窗口超出视口就自动开启滚动，scrollregion
+        # 必须显式设置（否则 yview 恒为 (0,1)，滚动条形同虚设）。
+        self.left_canvas = tk.Canvas(card, bg=CARD, highlightthickness=0, bd=0)
+        self.left_canvas.grid(row=1, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(card, orient="vertical",
+                           command=self.left_canvas.yview)
+        sb.grid(row=1, column=1, sticky="ns")
+        self._left_sb = sb
+        self.left_canvas.configure(yscrollcommand=sb.set)
+
+        self.seg_inner = ttk.Frame(self.left_canvas, style="Card.TFrame")
+        self.seg_inner.columnconfigure(0, weight=1)
+        self._seg_window = self.left_canvas.create_window(
+            (0, 0), window=self.seg_inner, anchor="nw")
+        self.left_canvas.bind("<Configure>", self._on_left_configure)
+        self.left_canvas.bind("<MouseWheel>", self._on_left_wheel)
 
         # --- 播放控制条（位于视频下方）---
         self.player_bar = PlayerBar(card, self)
@@ -214,6 +246,58 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
                  "右键点框删除；点框后再拖动可调整位置。",
             style="Muted.TLabel")
         self.lbl_hint.grid(row=3, column=0, sticky="w", pady=(6, 0))
+
+    # ---------- 左区滚动 ----------
+    def _on_left_configure(self, event) -> None:
+        self._layout_segments()
+
+    def _on_left_wheel(self, event) -> None:
+        """左区滚轮滚动。内容不满一屏时放行给外层。"""
+        delta = -int(event.delta / 120) if event.delta else 0
+        if not delta:
+            return
+        if self._seg_needed_height() <= self.left_canvas.winfo_height():
+            return
+        self.left_canvas.yview_scroll(delta, "units")
+        return "break"
+
+    def _seg_needed_height(self) -> int:
+        """所有画布卡片加起来需要多高（自然高度之和）。"""
+        total = 0
+        for c in self.cards:
+            try:
+                total += c.winfo_reqheight()
+            except tk.TclError:
+                pass
+        return total
+
+    def _layout_segments(self) -> None:
+        """重算左区滚动区尺寸。
+
+        高度取 max(需要的高度, 视口高度)：
+        - 需要的高度 > 视口：内容超出一屏，按需要的高度建滚动区
+        - 需要的高度 <= 视口：内嵌窗口撑满视口，滚动条隐藏
+        """
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            pass
+        view_h = max(1, self.left_canvas.winfo_height())
+        view_w = max(1, self.left_canvas.winfo_width())
+        need = self._seg_needed_height()
+        height = max(need, view_h)
+        self.left_canvas.itemconfigure(self._seg_window, width=view_w,
+                                       height=height)
+        self.left_canvas.configure(scrollregion=(0, 0, view_w, height))
+        if need > view_h + 2:
+            if not self._left_sb.winfo_ismapped():
+                self._left_sb.grid()
+            self.left_canvas.configure(yscrollcommand=self._left_sb.set)
+        else:
+            if self._left_sb.winfo_ismapped():
+                self._left_sb.grid_remove()
+            self.left_canvas.configure(yscrollcommand="")
+
 
     def _build_right(self, parent) -> None:
         # 右侧内容多时窗口装不下，整块套一层 Canvas 做纵向滚动：
@@ -249,13 +333,13 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.lbl_info.grid(row=r, column=0, sticky="w", pady=(0, 10))
         r += 1
 
-        # --- 待合并视频（最多 4 个，按槽位顺序拼接）---
+        # --- 待合并视频（最多 MAX_MERGE 个，按画布顺序拼接）---
         ttk.Label(side, text=f"待合并视频（最多 {self.MAX_MERGE} 个）",
                   style="Section.TLabel").grid(row=r, column=0, sticky="w",
                                                 pady=(0, 4))
         r += 1
         self.lbl_list_hint = ttk.Label(
-            side, text="点「添加视频」开空位，把视频拖进卡片",
+            side, text="点「添加视频」再开一个画布，把视频拖进画布",
             style="Muted.TLabel")
         self.lbl_list_hint.grid(row=r, column=0, sticky="w", pady=(0, 4))
         r += 1
@@ -499,6 +583,176 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.lbl_done.grid(row=1, column=0, columnspan=6, sticky="w", pady=(4, 0))
 
     # ============================================================
+    #              分段生命周期（每段 = 一个独立画布）
+    # ============================================================
+    @property
+    def active_segment(self) -> Segment | None:
+        """当前激活的那一段。"""
+        if 0 <= self.active_index < len(self.segments):
+            return self.segments[self.active_index]
+        return None
+
+    @property
+    def src(self) -> Path | None:
+        """当前段的源文件（旧的单文件接口，改成段模型后的等价物）。"""
+        seg = self.active_segment
+        return seg.file if seg else None
+
+    @property
+    def info(self):
+        """当前段的视频信息。"""
+        seg = self.active_segment
+        return seg.info if seg else None
+
+    @property
+    def canvas_box(self):
+        """当前段的画布（兼容旧接口名）。"""
+        if 0 <= self.active_index < len(self.cards):
+            return self.cards[self.active_index].canvas
+        return None
+
+    def add_segment(self) -> int:
+        """长出一个新的空画布，返回它的段索引。
+
+        「添加视频」按钮的语义：不是弹框选文件，而是在下面多开一块画布，
+        让人把视频拖进去。段数上限 MAX_MERGE。
+        """
+        if len(self.segments) >= self.MAX_MERGE:
+            self._notify(f"最多 {self.MAX_MERGE} 个视频，"
+                         "点画布右上角的 ✕ 可以移除一个")
+            return -1
+        index = len(self.segments)
+        seg = Segment(index=index)
+        self.segments.append(seg)
+
+        card = SegmentCard(self.seg_inner, self, index)
+        card.grid(row=index, column=0, sticky="ew", pady=(0, 8))
+        self.cards.append(card)
+        self._register_card_dnd(card, index)
+
+        self._layout_segments()
+        self.set_active_segment(index)
+        self._refresh_file_list()
+        self._refresh_preview_bar()
+        return index
+
+    def remove_segment(self, index: int) -> None:
+        """移除一段（连同它的画布）。"""
+        if not (0 <= index < len(self.segments)):
+            return
+        was_active = (index == self.active_index)
+
+        card = self.cards[index]
+        card.destroy()
+        self.cards.pop(index)
+        self.segments.pop(index)
+
+        # 重新编号，剩下的段顺序不变
+        for i, (s, c) in enumerate(zip(self.segments, self.cards)):
+            s.index = i
+            c.set_index(i)
+
+        # 段被移除后，原本指向它的勾选标记也要跟着挪
+        disabled = getattr(self, "_files_disabled", set())
+        self._files_disabled = {
+            (i - 1 if i > index else i) for i in disabled if i != index
+        }
+
+        if not self.segments:
+            self.active_index = 0
+        elif was_active:
+            self.active_index = min(index, len(self.segments) - 1)
+        else:
+            self.active_index = min(self.active_index, len(self.segments) - 1)
+
+        self._apply_active_state()
+        self._layout_segments()
+        self._refresh_file_list()
+        self._refresh_preview_bar()
+
+    def clear_segment(self, index: int) -> None:
+        """清空某一段的视频（画布保留，回到空状态）。"""
+        if not (0 <= index < len(self.segments)):
+            return
+        seg = self.segments[index]
+        if seg.file is None:
+            return
+        was_active = (index == self.active_index)
+        seg.file = None
+        seg.info = None
+        seg.proxy = None
+        seg.thumb = None
+        seg.proxy_pending = False
+        seg.position = 0.0
+        if was_active:
+            self._pause()
+            self.proxy = None
+            self.player_bar.set_ready(False)
+        if 0 <= index < len(self.cards):
+            self.cards[index].canvas.clear_image()
+            self.cards[index].set_file_name(None)
+        self._refresh_file_list()
+        self._refresh_preview_bar()
+
+    def set_active_segment(self, index: int) -> None:
+        """切换激活段：只有激活段会被播放。"""
+        if not (0 <= index < len(self.segments)):
+            return
+        if index == self.active_index:
+            self._apply_active_state()
+            return
+        # 旧段：把播放位置存回去，画面退回首帧静帧
+        old = self.active_segment
+        if old is not None:
+            old.position = self.position
+            if old.thumb and 0 <= old.index < len(self.cards):
+                self.cards[old.index].canvas.set_thumbnail(old.thumb)
+        self.active_index = index
+        self._pause()
+        self._apply_active_state()
+        self._load_active_player()
+
+    def _apply_active_state(self) -> None:
+        """把「激活」状态同步到各个画布卡片。"""
+        for i, c in enumerate(self.cards):
+            c.canvas.set_active(i == self.active_index)
+        self._refresh_info_text()
+        self._refresh_vin_text()
+
+    def _load_active_player(self) -> None:
+        """为激活段准备播放器。
+
+        - 已有代理：直接接上，定位到上次播放的位置
+        - 没有代理：后台生成（代理是整段转码，比抽首帧重得多；
+          但所有段都会各自生成一份，所以切段通常能立刻播）
+        """
+        seg = self.active_segment
+        if seg is None:
+            return
+        self.position = seg.position
+        if seg.proxy is None:
+            self.proxy = None
+            self.player_bar.set_ready(False)
+            if seg.file is not None:
+                self._build_proxy_async(seg.file, index=self.active_index)
+            return
+        self.proxy = seg.proxy
+        dur = seg.info.duration if seg.info else None
+        self.player_bar.set_ready(True)
+        self.player_bar.seek.set_duration(dur)
+        self.player_bar.update_time(self.position, dur)
+        # 显示该段的画面（有代理就走真实帧，否则退回静帧）
+        if dur and dur > 0:
+            self.on_seek_to(self.position)
+        elif seg.thumb and 0 <= self.active_index < len(self.cards):
+            self.cards[self.active_index].canvas.set_thumbnail(seg.thumb)
+
+    def _sync_segments_to_list(self) -> None:
+        """把分段状态同步到右侧列表与顶栏状态位。"""
+        self._refresh_file_list()
+        self._refresh_preview_bar()
+
+    # ============================================================
     #              主线程 <-> 后台线程 通信
     # ============================================================
     def _post(self, kind: str, *args) -> None:
@@ -529,6 +783,7 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         handlers = {
             "proxy_progress": lambda: self._on_proxy_progress(*args),
             "proxy_ready": lambda: self._on_proxy_ready(*args),
+            "thumb_ready": lambda: self._on_thumb_ready(*args),
             "job_progress": lambda: self._update_progress(*args),
             "job_log": lambda: self._notify(*args),
             "job_done": lambda: self._finish_job(*args),
@@ -551,6 +806,10 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
             self.lbl_prog.grid_remove()
 
     # ---------- 空闲状态：隐藏与"正在干活"相关的元素 ----------
+    def _any_loaded(self) -> bool:
+        """是否至少有一段载入了视频。"""
+        return any(s.file is not None for s in self.segments)
+
     def _apply_idle_state(self) -> None:
         """没有任务时，隐藏进度条 / 状态文字 / 播放控制条。
 
@@ -560,7 +819,7 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.progress.grid_remove()
         self.lbl_prog.grid_remove()
         self.lbl_done.grid_remove()
-        if not self.src:
+        if not self._any_loaded():
             # 以下元素都属于"已载入视频"的语境，没文件时不出现：
             # 播放条、预览时间点输入、框选操作指引
             self.player_bar.grid_remove()
@@ -570,7 +829,7 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         """有任务时，恢复进度条与状态文字。"""
         self.progress.grid()
         self.lbl_prog.grid()
-        if self.src:
+        if self._any_loaded():
             self.player_bar.grid()
             self.lbl_hint.grid()
 
@@ -603,18 +862,13 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
             self.lbl_done.grid_remove()
 
     def on_add_video(self) -> None:
-        """在画面上开一个空槽位，把视频拖进去即可加入合并。
+        """长出一个新的空画布，把视频拖进去即可。
 
         不用弹框选文件：弹框选完还得自己记哪个是第几段，
-        直接在画面上开卡片更直观 —— 第几段、拖了什么、要不要删，
+        直接在画面上开新画布更直观 —— 第几段、拖了什么、要不要删，
         一眼就清楚。上限 MAX_MERGE 个。
         """
-        if len(self.canvas_box.slots) >= self.MAX_MERGE:
-            self._notify(f"最多合并 {self.MAX_MERGE} 个视频，"
-                         "右键点卡片可移除一个")
-            return
-        self.canvas_box.add_slot()
-        self._refresh_file_list()
+        self.add_segment()
 
     # ---------- 合并多个分段视频 ----------
     def _sync_merge_btn(self) -> None:
@@ -629,7 +883,7 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         典型场景：行车记录仪按时间分段录制，同一起事故被切在两个文件里，
         合并后才能看清完整过程。
 
-        视频靠拖放加入列表，顺序即合并顺序；在列表里点掉某一项
+        视频靠拖放加入画布，顺序即合并顺序；在列表里点掉某一项
         就把它排除在外，拖错了也能改。
         """
         if not self.ffmpeg:
@@ -640,13 +894,13 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         # 只合并还存在的文件
         files = [f for f in files if f.is_file()]
         if len(files) < 2:
-            skipped = len(getattr(self, "preview_files", [])) - len(
-                self._merge_targets())
+            total = len(self._filled_segments())
+            skipped = total - len(self._merge_targets())
             extra = f"（已取消 {skipped} 个）" if skipped > 0 else ""
             self._notify(
                 f"当前只有 {len(files)} 个可合并视频{extra}，无法合并"
                 f"（至少需要 2 个）。\n"
-                "请点「添加视频」选 2 个以上（也可直接把文件拖到窗口）。")
+                "请点「添加视频」再开一个画布，把视频拖进去。")
             return
 
         total_mb = sum(f.stat().st_size for f in files) / 1024 / 1024
@@ -669,24 +923,30 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
             return
 
         # 复用当前界面的遮挡设置（与「开始处理」用同一份构造逻辑）
-        src_info = self.info
-        width = src_info.width if src_info else 1920
-        height = src_info.height if src_info else 1080
+        # 合并输出统一到「基准分辨率」：所有段先 scale 到同一尺寸再 concat，
+        # 遮挡滤镜在 concat 之后统一做一次，坐标基准就是 canon。
+        width = self.canon_w or 1920
+        height = self.canon_h or 1080
         plan = MaskPlan(
             width=width, height=height,
             use_vin_preset=bool(self.var_vin.get()),
             vin_box=self.vin_box_real,
-            extra=[MaskRegion(**r.to_dict()) for r in self.canvas_box.regions],
+            extra=[MaskRegion(**r.to_dict()) for r in self.regions],
             effect=self._current_effect(),
             intensity=int(self.var_strength.get() or 0),
         )
         crf = int(self.var_crf.get())
-        fps = src_info.fps if src_info and src_info.fps > 0 else 25.0
+        fps = 25.0
+        for seg in self.segments:
+            if seg.file in files and seg.info and seg.info.fps > 0:
+                fps = seg.info.fps
+                break
 
         try:
             cmd = packager.build_merge_command(
                 self.ffmpeg, files, out, plan,
-                crf=crf, preset="slow", fps=fps)
+                crf=crf, preset="slow", fps=fps,
+                out_size=(width, height))
         except ValueError as e:
             self._notify(f"合并参数有误：{e}")
             return
@@ -768,9 +1028,14 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
 
     def on_clear_regions(self) -> None:
         """清空全部自定义遮挡框（不影响自动 VIN 遮挡）。"""
-        self.canvas_box.regions = []
-        self.canvas_box._redraw()
+        self.regions = []
+        self._redraw_all_canvases()
         self.on_regions_changed()
+
+    def _redraw_all_canvases(self) -> None:
+        """所有画布共享一套框，任何一处改动都要全部重画。"""
+        for c in self.cards:
+            c.canvas._redraw()
 
     def on_regions_changed(self) -> None:
         """刷新遮挡区域列表，让用户导出前能核对坐标。"""
@@ -778,7 +1043,7 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         if self.var_vin.get():
             x, y, w, h = self.vin_box_real
             self.lst_regions.insert("end", f"[自动] VIN      x={x} y={y} w={w} h={h}")
-        for i, r in enumerate(self.canvas_box.regions, 1):
+        for i, r in enumerate(self.regions, 1):
             self.lst_regions.insert(
                 "end", f"[自定义{i}] x={r.x} y={r.y} w={r.w} h={r.h}")
 
@@ -805,7 +1070,12 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
             "  25+  体积优先，细节损失明显\n\n"
             "数值越小越清晰、体积越大。"))
 
-    def load_file(self, path: Path, keep_regions: bool = False) -> None:
+    def load_file(self, path: Path, keep_regions: bool = False,
+                  index: int | None = None) -> None:
+        """把一个视频载入某一段（默认载入当前激活段）。
+
+        index 为 None 时用当前激活段；若该段已有文件则先清空。
+        """
         path = Path(path)
         if not path.is_file():
             self._notify(f"文件不存在：{path}")
@@ -814,9 +1084,23 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
             self._notify("ffmpeg 未就绪")
             return
 
+        if index is None:
+            index = self.active_index
+        if not (0 <= index < len(self.segments)):
+            index = self.add_segment()
+            if index < 0:
+                return
+        seg = self.segments[index]
+
+        # 载入到哪一段，就把哪一段切成激活段：
+        # 用户把视频拖进某个画布，就是要在那个画布上干活。
+        # （此时该段还没绑定文件，切激活不会重复触发代理生成，
+        #   代理统一由下面的分支启动。）
+        if index != self.active_index:
+            self.set_active_segment(index)
+
         self._set_busy(True, "读取文件信息…")
         try:
-            self.src = path
             self.cfg["last_dir"] = str(path.parent)
             config.save(self.cfg)
 
@@ -826,49 +1110,57 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
                                      "无法解析该视频文件。\n\n请确认是行车记录仪导出的 "
                                      ".h264 或视频文件。")
                 return
-            self.info = info
 
             # 裸流没有容器时长，用数帧反推
             if info.duration is None:
                 info.duration = ffmpeg_env.probe_duration_by_counting(
                     self.ffprobe, path, info.fps)
 
-            self._refresh_preview_bar()
-            self._refresh_info_text()
+            seg.file = path
+            seg.info = info
+            seg.position = 0.0
+            seg.proxy = None
+            seg.thumb = None
+            seg.proxy_pending = False
 
-            # VIN 预设坐标按真实分辨率等比映射
-            base = tuple(self.cfg.get("vin_preset_1920x1080", VIN_PRESET_BOX))
-            self.vin_box_real = scale_box(
-                base, (REF_W, REF_H), (info.width, info.height))
-            self._refresh_vin_text()
+            # 全局坐标基准 = 第一个载入的视频的真实分辨率。
+            # 之后所有段都用这一套坐标，遮挡框在任意段上落在相同相对位置。
+            if not self.canon_w or not self.canon_h:
+                self.canon_w = info.width
+                self.canon_h = info.height
+                # VIN 预设坐标按基准分辨率等比映射
+                base = tuple(self.cfg.get("vin_preset_1920x1080", VIN_PRESET_BOX))
+                self.vin_box_real = scale_box(base, (REF_W, REF_H),
+                                              (self.canon_w, self.canon_h))
 
-            # 坐标基准 = 视频真实分辨率。后面播放时会换成 640x360 的代理图，
-            # 遮挡坐标仍记在这个基准上，所以必须先设好。
-            self.canvas_box.set_video_size(info.width, info.height)
+            card = self.cards[index]
+            card.set_file_name(path.name)
+            card.canvas.set_video_size(info.width, info.height)
+            card.canvas.clear_image()
 
-            # 这里不再抽帧：预览由代理文件的播放条负责。
-            # 画布先清空，代理就绪后会自动显示第一帧。
-            self.canvas_box.clear_image()
-            self.canvas_box.set_video_size(info.width, info.height)
+            # 先抽首帧静帧（很快），画布马上就有画面；
+            # 代理是整段转码，慢，但每一段都后台生成 ——
+            # 这样切换到另一段时能立刻播放，不用等它转码。
+            self._build_thumb_async(path, index)
 
-            if not keep_regions:
-                self.canvas_box.regions = []
-            self.on_regions_changed()
-            self.var_outname.set(f"{path.stem}_mosaic.mp4")
-            self.btn_start.config(state="normal")
+            if index == self.active_index:
+                self.var_outname.set(f"{path.stem}_mosaic.mp4")
+                self.btn_start.config(state="normal")
+                # 重置播放器状态，随后后台生成代理预览
+                self._pause()
+                self.proxy = None
+                self.position = 0.0
+                self.player_bar.set_ready(False)
+                self.player_bar.seek.set_duration(info.duration)
+                self.player_bar.update_time(0.0, info.duration)
+                self._notify("正在生成预览，完成后即可播放…")
+                self._apply_busy_state()   # 已选文件，播放条与进度条都该出现
 
-            # 重置播放器状态，随后后台生成代理预览
-            self._pause()
-            self.proxy = None
-            self.position = 0.0
-            self.player_bar.set_ready(False)
-            self.player_bar.seek.set_duration(self.info.duration)
-            self.player_bar.update_time(0.0, self.info.duration)
-            self._notify("正在生成预览，完成后即可播放…")
-            self._apply_busy_state()      # 已选文件，播放条与进度条都该出现
-            self._build_proxy_async(path)
+            # 无论是否激活段，都后台生成该段的代理
+            self._build_proxy_async(path, index=index)
         finally:
             self._set_busy(False)
+        self._sync_segments_to_list()
 
     def _preview_dir(self) -> str:
         import tempfile
@@ -877,18 +1169,21 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         return str(d)
 
     def _refresh_info_text(self) -> None:
-        if not self.info or not self.src:
+        """显示当前激活段的文件信息。"""
+        seg = self.active_segment
+        if not seg or not seg.info or not seg.file:
             self.lbl_info.config(text="—")
             return
-        i = self.info
+        i = seg.info
         try:
-            size_mb = self.src.stat().st_size / 1024 / 1024
+            size_mb = seg.file.stat().st_size / 1024 / 1024
         except OSError:
             size_mb = 0
         dur = hhmmss(i.duration) if i.duration else "未知"
         audio = "有" if i.has_audio else "无（裸流常见）"
+        head = f"第 {self.active_index + 1} 段\n" if len(self.segments) > 1 else ""
         self.lbl_info.config(text=(
-            f"分辨率：{i.size_str}    帧率：{i.fps:g} fps\n"
+            f"{head}分辨率：{i.size_str}    帧率：{i.fps:g} fps\n"
             f"时长：{dur}\n"
             f"音轨：{audio}\n"
             f"体积：{size_mb:,.0f} MB"
@@ -955,29 +1250,54 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
             self.ffmpeg_status.config(
                 text="未启用拖放（缺 tkinterdnd2），请用按钮选文件", foreground=MUTED)
             return
-        for widget in (self, self.canvas_box):
+        try:
+            self.drop_target_register(DND_FILES)
+            self.dnd_bind("<<Drop>>", self.on_drop)
+            self.dnd_bind("<<DragEnter>>", self._on_drag_enter)
+            self.dnd_bind("<<DragLeave>>", self._on_drag_leave)
+        except (tk.TclError, AttributeError):
+            pass
+        # 每个画布单独注册，这样能知道拖到了哪一段
+        for i, c in enumerate(self.cards):
+            self._register_card_dnd(c, i)
+
+    def _register_card_dnd(self, card, index: int) -> None:
+        """给一个画布卡片注册拖放目标。"""
+        if not _HAS_DND:
+            return
+        for widget in (card.canvas, card.canvas.canvas):
             try:
                 widget.drop_target_register(DND_FILES)
-                widget.dnd_bind("<<Drop>>", self.on_drop)
-                widget.dnd_bind("<<DragEnter>>", self._on_drag_enter)
-                widget.dnd_bind("<<DragLeave>>", self._on_drag_leave)
+                widget.dnd_bind("<<Drop>>",
+                                lambda e, i=index: self.on_drop(e, i))
+                widget.dnd_bind("<<DragEnter>>",
+                                lambda e, i=index: self._on_drag_enter(e, i))
+                widget.dnd_bind("<<DragLeave>>",
+                                lambda e, i=index: self._on_drag_leave(e, i))
             except (tk.TclError, AttributeError):
                 continue
 
-    def _on_drag_enter(self, _event=None) -> None:
-        self.canvas_box.set_drop_highlight(True)
+    def _on_drag_enter(self, _event=None, index: int | None = None) -> None:
+        """拖拽悬停：高亮落点对应的画布。"""
+        if index is None:
+            index = self.active_index
+        if 0 <= index < len(self.cards):
+            self.cards[index].canvas.set_drop_highlight(True)
 
-    def _on_drag_leave(self, _event=None) -> None:
-        self.canvas_box.set_drop_highlight(False)
+    def _on_drag_leave(self, _event=None, index: int | None = None) -> None:
+        if index is None:
+            index = self.active_index
+        if 0 <= index < len(self.cards):
+            self.cards[index].canvas.set_drop_highlight(False)
 
-    def on_drop(self, event) -> None:
-        """拖入的视频填进对应槽位。
+    def on_drop(self, event, index: int | None = None) -> None:
+        """拖入的视频填进对应段的画布。
 
-        - 拖到某张空卡片上 -> 填进那个槽位
-        - 拖到空白处-> 填进第一个空槽，没有空槽就自动开一个新槽
-        合并顺序 = 槽位顺序（第1 张卡= 第 1 段）。
+        - 拖到某块画布上 -> 填进那一段（该段已有文件则替换）
+        - 拖到窗口其它位置 -> 填进当前激活段
+        合并顺序 = 画布顺序（第 1 块 = 第 1 段）。
         """
-        self.canvas_box.set_drop_highlight(False)
+        self._on_drag_leave(None, index)
         try:
             data = event.data
             paths = self.tk.splitlist(data) if isinstance(data, str) else list(data)
@@ -990,49 +1310,16 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
             self._notify("拖入的文件不是支持的视频格式")
             return
 
-        # 用事件坐标判断落在哪张卡上（Canvas 内坐标）
-        card = self.canvas_box.slot_at(event.x, event.y) \
-            if getattr(event, "x", None) is not None else None
-        if card is not None and not card.filled:
-            self.canvas_box.fill_slot(card, videos[0])
-            self._sync_slots_to_list()
-            # 第一个填入的视频自动载入主画面
-            if self.src is None:
-                self.load_file(card.file)
-            else:
-                self._refresh_file_list()
-            if len(videos) > 1:
-                self._notify("一张卡只放一个视频，其余已忽略")
-            return
+        if index is None:
+            index = self.active_index
+        if not (0 <= index < len(self.segments)):
+            index = self.add_segment()
+            if index < 0:
+                return
 
-        # 落在空白处：找空槽，没有就自动开一个
-        for v in videos:
-            empty = next((s for s in self.canvas_box.slots if not s.filled), None)
-            if empty is None:
-                if len(self.canvas_box.slots) >= self.MAX_MERGE:
-                    self._notify(f"最多合并 {self.MAX_MERGE} 个视频")
-                    break
-                empty = self.canvas_box.add_slot()
-            self.canvas_box.fill_slot(empty, v)
-
-        self._sync_slots_to_list()
-        if self.src is None and self.preview_files:
-            self.load_file(self.preview_files[0])
-
-    def _sync_slots_to_list(self) -> None:
-        """把槽位内容同步到 preview_files（跳过空槽，保持槽位顺序）。"""
-        self.preview_files = [s.file for s in self.canvas_box.slots
-                              if s.filled and s.file is not None]
-        self._refresh_file_list()
-
-    def on_slot_removed(self, slot) -> None:
-        """槽位被右键移除后同步列表。"""
-        self._sync_slots_to_list()
-        # 移除的正好是当前预览的文件 -> 换成剩余的第一个
-        if slot.filled and getattr(self, "src", None) == slot.file:
-            self.src = None
-            if self.preview_files:
-                self.load_file(self.preview_files[0])
+        self.load_file(videos[0], index=index)
+        if len(videos) > 1:
+            self._notify("一个画布只放一个视频，其余已忽略")
 
     def _bind_player_keys(self) -> None:
         """键盘快捷键（全局绑定到窗口）。"""
@@ -1047,24 +1334,73 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.bind("<Prior>", lambda e: self.on_seek_delta(-30))
         self.bind("<Next>", lambda e: self.on_seek_delta(30))
 
-    def _build_proxy_async(self, source: Path) -> None:
-        """后台生成代理预览文件，完成后自动接上播放器。"""
+    def _build_proxy_async(self, source: Path, index: int | None = None) -> None:
+        """后台生成代理预览文件，完成后自动接上播放器。
+
+        每一段都有自己的代理：切段时能立刻播，不用等转码。
+        """
+        if index is None:
+            index = self.active_index
+        seg = self.segments[index] if 0 <= index < len(self.segments) else None
+        if seg is not None:
+            if seg.proxy is not None and seg.proxy.is_file():
+                return          # 已有代理，直接复用
+            if seg.proxy_pending:
+                return          # 正在生成中，别重复启动
+            seg.proxy_pending = True
+
         def work() -> None:
             def prog(sec: float, _elapsed: float) -> None:
-                self._post("proxy_progress", sec)
+                self._post("proxy_progress", sec, index)
             try:
                 path = ensure_proxy(self.ffmpeg, source, ProxySpec(),
                                     on_progress=prog, cancel_event=self.cancel_event)
             except Exception:  # noqa: BLE001 - 后台异常要送回主线程显示
                 traceback.print_exc()
                 path = None
-            self._post("proxy_ready", path)
-        self.worker = threading.Thread(target=work, daemon=True)
-        self.worker.start()
+            self._post("proxy_ready", path, index)
+        threading.Thread(target=work, daemon=True).start()
 
-    def _on_proxy_progress(self, sec: float) -> None:
+    def _build_thumb_async(self, source: Path, index: int) -> None:
+        """后台抽首帧静帧（非激活段用，避免生成完整代理）。"""
+        def work() -> None:
+            try:
+                out = thumb_path_for(source)
+                path = extract_thumbnail(self.ffmpeg, source, out)
+            except Exception:  # noqa: BLE001
+                traceback.print_exc()
+                path = None
+            self._post("thumb_ready", path, index)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_thumb_ready(self, path: Path | None, index: int) -> None:
+        """首帧静帧就绪。
+
+        非激活段靠它占位；激活段也会先显示它，等代理就绪后被真实帧替换。
+        """
+        if not path or not (0 <= index < len(self.segments)):
+            return
+        seg = self.segments[index]
+        seg.thumb = path
+        if 0 <= index < len(self.cards):
+            card = self.cards[index]
+            # 激活段若已经在放真实帧，就别用静帧盖掉；
+            # 但如果画布还是空的（代理还没好），静帧要先顶上，
+            # 否则非激活段会一直是一片空白。
+            if index == self.active_index and card.canvas.image is not None:
+                return
+            card.canvas.set_thumbnail(path)
+
+    def _on_proxy_progress(self, sec: float, index: int | None = None) -> None:
         """代理生成进度（此时界面还能单帧预览，只是不能播放）。"""
-        dur = self.info.duration if self.info else None
+        if index is None:
+            index = self.active_index
+        # 进度条只反映当前激活段：非激活段在后台转码，
+        # 不该抢走用户正在看的那段的进度显示。
+        if index != self.active_index:
+            return
+        seg = self.segments[index] if 0 <= index < len(self.segments) else None
+        dur = seg.info.duration if (seg and seg.info) else None
         if dur:
             pct = min(100.0, sec / dur * 100)
             self.progress.set_progress(pct)
@@ -1073,7 +1409,18 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
             self.progress.set_indeterminate(True)
             self._show_prog(f"生成预览 {hhmmss(sec)}")
 
-    def _on_proxy_ready(self, path: Path | None) -> None:
+    def _on_proxy_ready(self, path: Path | None, index: int | None = None) -> None:
+        if index is None:
+            index = self.active_index
+        seg = self.segments[index] if 0 <= index < len(self.segments) else None
+        if seg is not None:
+            seg.proxy = path
+            seg.proxy_pending = False
+        if index != self.active_index:
+            # 代理生成给了别的段：记下路径即可，等用户切过去时再接播放器。
+            # 不影响当前播放，也不该动忙碌状态
+            # （当前激活段可能正在做自己的事）。
+            return
         self.progress.reset()
         if not path or not path.is_file():
             self.player_bar.set_ready(False)
@@ -1082,16 +1429,16 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
             return
         self.proxy = path
         self._set_busy(False)
-        dur = self.info.duration if self.info else None
+        dur = seg.info.duration if (seg and seg.info) else None
         self.player_bar.seek.set_duration(dur)
         self.player_bar.set_ready(True)
-        self.player_bar.update_time(0.0, dur)
+        self.player_bar.update_time(self.position, dur)
         self._ready_for_seek.set()
         self._notify(f"预览已就绪（{path.stat().st_size / 1048576:.1f}MB），"
                      f"可播放 / 快进 / 拖动进度条")
         # 显示第一帧，让用户立即看到画面
         if dur and dur > 0:
-            self.on_seek_to(0.0)
+            self.on_seek_to(self.position)
 
     # ---------- 播放控制 ----------
     def on_toggle_play(self) -> None:
@@ -1260,7 +1607,7 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self._schedule_next_frame(delay)
 
     def _show_rgb(self, w: int, h: int, rgb: bytes) -> None:
-        """把 RGB 字节显示到画布。
+        """把 RGB 字节显示到**当前激活段**的画布。
 
         用 PPM(P6) 格式直接喂给 PhotoImage —— tkinter 原生支持，
         比转成 PNG 再读快得多（实测 7.6ms vs 62.3ms）。
@@ -1269,7 +1616,9 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
             ppm = b"P6\n%d %d\n255\n" % (w, h) + rgb
             img = tk.PhotoImage(data=ppm)
             self._ppm_cache = img          # 必须保留引用，否则被回收后画面消失
-            self.canvas_box.set_frame_image(img, w, h)
+            canvas = self.canvas_box
+            if canvas is not None:
+                canvas.set_frame_image(img, w, h)
         except tk.TclError:
             self._notify("该帧无法显示")
 
@@ -1359,6 +1708,11 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
 
     # ---------- 处理 ----------
     def on_start(self) -> None:
+        """处理当前激活段（单文件转码 + 遮挡）。
+
+        多段的合并走「合并」按钮（on_merge），那里会把所有段
+        scale 到同一尺寸后 concat，再统一做一次遮挡。
+        """
         if not self.src or not self.info or self.busy:
             return
         try:
@@ -1386,11 +1740,20 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
             out_name += ".mp4"
         out_path = self.src.parent / out_name
 
+        # 遮挡框存在**全局基准分辨率**下；当前段的分辨率可能与基准不同
+        # （两段视频来自不同设备时），所以这里要按比例换算到当前段。
+        src_res = (self.canon_w, self.canon_h) if self.canon_w else \
+            (self.info.width, self.info.height)
+        dst_res = (self.info.width, self.info.height)
+        extra = scale_regions(self.regions, src_res, dst_res)
+        vin_box = scale_box(self.vin_box_real, src_res, dst_res) \
+            if src_res != dst_res else self.vin_box_real
+
         plan = MaskPlan(
             width=self.info.width, height=self.info.height,
             use_vin_preset=bool(self.var_vin.get()),
-            vin_box=self.vin_box_real,
-            extra=[MaskRegion(**r.to_dict()) for r in self.canvas_box.regions],
+            vin_box=vin_box,
+            extra=[MaskRegion(**r.to_dict()) for r in extra],
             effect=self._current_effect(),
             intensity=int(self.var_strength.get() or 0),
         )

@@ -63,6 +63,7 @@ def build_merge_command(
     crf: int = 21,
     preset: str = "slow",
     fps: float = 25.0,
+    out_size: tuple[int, int] | None = None,
 ) -> list[str]:
     """构造「按顺序拼接多个视频，并顺带做遮挡」的 ffmpeg 命令。
 
@@ -77,7 +78,10 @@ def build_merge_command(
        （ffprobe 会报 1200000/1），不归一会让 concat 输出只有几百字节的空文件。
     3. 每段都要 setpts=PTS-STARTPTS 重置时间戳，否则第二段的时间戳接不上。
     4. setsar=1 统一像素宽高比，避免拼接后画面被拉伸。
-    5. 遮挡滤镜排在 concat 之后 —— 先拼完整段，再统一遮挡，
+    5. **每段都要 scale 到同一尺寸**。concat 滤镜要求所有输入尺寸一致，
+       分辨率不同的两段直接拼接会报 "Dimensions mismatch" 而失败。
+       out_size 指定目标尺寸（通常取第一段的分辨率）。
+    6. 遮挡滤镜排在 concat 之后 —— 先拼完整段，再统一遮挡，
        这样遮挡区域只需在输出分辨率上算一次，不必逐段换算。
     """
     if len(inputs) < 2:
@@ -92,11 +96,14 @@ def build_merge_command(
             cmd += ["-f", "h264"]
         cmd += ["-i", str(p)]
 
-    # 逐段归一：帧率、时间戳、像素宽高比
-    parts = [
-        f"[{i}:v]fps={fps:g},setpts=PTS-STARTPTS,setsar=1[v{i}]"
-        for i in range(len(inputs))
-    ]
+    # 逐段归一：帧率、时间戳、尺寸、像素宽高比
+    parts = []
+    for i in range(len(inputs)):
+        chain = [f"fps={fps:g}", "setpts=PTS-STARTPTS"]
+        if out_size:
+            chain.append(f"scale={out_size[0]}:{out_size[1]}")
+        chain.append("setsar=1")
+        parts.append(f"[{i}:v]" + ",".join(chain) + f"[v{i}]")
 
     # concat 把所有段串起来，输出标签固定叫 [cat]
     labels = "".join(f"[v{i}]" for i in range(len(inputs)))

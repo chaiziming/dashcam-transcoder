@@ -1,68 +1,65 @@
-"""预览画布：显示代理画面 + 拖拽框选遮挡区域。
+"""预览画布：一个画布 = 一段视频（多个画布上下排布，互不干扰）。
 
-从 main.py 抽出的独立模块。
-原main.py 里它和 MosaicApp 混在一起，导致 main.py 超过 1600 行；
-这里单独成文件后，main.py 只剩应用装配与事件处理。
+与旧版「一个大画布内平分 N 个槽位」的区别：
+  - 旧版：N 段视频挤在同一块画布里，槽位只是画布上的子区域
+  - 现在：N 个**独立**画布，每个画布有自己的画面、自己的拖拽交互
 
-坐标约定（重要）：
-  - 视频像素坐标：遮挡框实际存放的坐标，必须按「视频真实分辨率」记录，
-    否则导出时坐标全错。
-  - 显示坐标：Canvas 上的实际像素，用于鼠标交互。
-  两者通过 scale / offset 双向换算。
+坐标约定（三层，必须分清）：
+  - 视频像素坐标：视频真实分辨率下的像素
+  - 全局遮挡坐标（canonical）：app.regions 里存的坐标，基准分辨率是
+    app.canon_w × app.canon_h（通常是第一段的真实分辨率）。
+    所有段**共用这一套框**，所以必须有统一基准。
+  - 显示坐标：Canvas 上的实际像素
+
+换算链（显示 → 全局）：
+    显示 px --/scale--> 代理图像素 --×(video/img)--> 视频像素
+          --×(canon/video)--> 全局坐标
+反向同理。视频分辨率与基准分辨率的比例会互相抵消，
+所以同一个全局框在任意画布上都落在**相同的相对位置**上。
+
+关键：显示用的图是 640x360 的代理，但遮挡坐标必须记在真实分辨率基准上，
+否则导出时坐标全错。
 """
 from __future__ import annotations
 
 import tkinter as tk
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from .mask import MaskRegion
 from .theme import ACCENT, BORDER, CARD
 
-# 槽位卡配色
-SLOT_BG = "#1a1d21"            # 槽位底色：与画布一致，看不出是「卡片」
-SLOT_EDGE = "#39424d"           # 空槽分隔线，很淡
-SLOT_FILLED = "#1f3d2e"        # 已填文件的槽位：稍亮的深绿
-SLOT_FILLED_EDGE = "#3f9e6b"
+# 画布底色：深色「黑布」区
+SLOT_BG = "#1a1d21"
+# 未激活画布的边框
+EDGE = "#d7dee7"
+# 拖拽悬停高亮（琥珀色，与激活态的蓝色区分）
+DROP_EDGE = "#f0a020"
+# 画布内文字
 SLOT_TEXT = "#c3cbd6"
 SLOT_SUB = "#8b95a3"
 
-
-@dataclass
-class SlotCard:
-    """一个待合并视频的槽位（画面上的一片区域）。
-
-    点「添加视频」开出一个空槽，把文件拖到它上面就填进来。
-    file 为 None 表示空槽。
-    """
-
-    index: int                       # 第几个（0 起）
-    file: Path | None = None
-    # 显示坐标（Canvas 像素）。每帧按画布大小重算，见 _layout_slots。
-    x: float = 0.0
-    y: float = 0.0
-    w: float = 0.0
-    h: float = 0.0
-
-    @property
-    def filled(self) -> bool:
-        return self.file is not None
+# 每个画布的默认高度（像素）。两个画布纵向排列时需要滚动才能看全，
+# 但单个画布不能太矮 —— 16:9 的视频在 645px 宽的左栏里，若按宽度铺满
+# 需要约 363px 高。取 300 让视频基本铺满宽度，VIN 条才有足够高度可点。
+CANVAS_HEIGHT = 300
 
 
 class MaskCanvas(tk.Frame):
-    """预览画面 + 拖框遮挡。
+    """一段视频的预览画面 + 拖框遮挡。
 
-    画面按比例缩放显示，内部坐标（视频像素）与显示坐标之间做双向换算。
+    画面按比例缩放显示，内部坐标（全局遮挡坐标）与显示坐标之间做双向换算。
 
     这里刻意继承 tk.Frame 而非 ttk.Frame：需要 -bg / -highlightbackground
     这类 tkinter 专有选项，ttk.Frame 不支持（会抛 TclError）。
     """
 
-    def __init__(self, master, app: "MosaicApp"):
-        # 不画外框线：让画布与所在卡片融为一体，避免出现「深色区被框住」的割裂感
-        super().__init__(master, bg=CARD, highlightbackground=CARD,
-                         highlightthickness=0)
+    def __init__(self, master, app, index: int = 0,
+                 height: int = CANVAS_HEIGHT):
+        # 画布外框线：每个画布是独立的一块，边框用来区分「哪块是激活的」
+        super().__init__(master, bg=CARD, highlightbackground=EDGE,
+                         highlightthickness=1)
         self.app = app
+        self.index = index
         self.image: tk.PhotoImage | None = None
         self.img_w = 0
         self.img_h = 0
@@ -70,41 +67,47 @@ class MaskCanvas(tk.Frame):
         self.offset_x = 0
         self.offset_y = 0
 
-        self.regions: list[MaskRegion] = []
-        # 待合并视频的槽位卡：点「添加视频」就在画面上开一片空白区域，
-        # 把文件拖到某张卡上即加入该槽位。比弹框选文件更直观，
-        # 也能一眼看出「第几段」。
-        self.slots: list[SlotCard] = []
         self._drag_from: tuple[float, float] | None = None
         self._drag_now: tuple[float, float] | None = None
         self._active_idx: int | None = None
         self._drop_hint = False
-        # 关键：显示用的图可能是 640x360 的代理，但遮挡坐标必须记在原视频分辨率
-        # （如 1920x1080）上，否则导出时坐标全错。
+        self._is_active = False
+        # 关键：显示用的图可能是 640x360 的代理，但遮挡坐标必须记在
+        # 基准分辨率（app.canon_w × app.canon_h）上，否则导出时坐标全错。
         self.video_w = 0
         self.video_h = 0
 
-        # 光标说明：
-        # 有预览图 -> crosshair（框选）；无图 -> hand2（提示去选文件）。
-        # 之前固定 crosshair，在空白处按住拖会像"禁止"一样没反应。
-        # 不写死height，而是给一个最小高度：之前固定 340px，窗口拉高后
-        # 底部留一大块空白，深色区与卡片背景割裂。
-        # 这里用最小高度 + expand，让它至少够看，窗口大时也能跟着长。
         self.canvas = tk.Canvas(self, bg=SLOT_BG, highlightthickness=0,
-                                height=360, cursor="crosshair")
-        # 不留内边距：画布本身就是一整块深色区域，槽位卡画在它上面。
-        # 之前留了 8px 白边，会把「黑色视频区」和卡片区割成两块。
-        self.canvas.pack(fill="both", expand=True, padx=0, pady=0)
+                                height=height, cursor="crosshair")
+        # 内层画布用 grid 铺满外框内容区（外框 highlightthickness 恒为 1，
+        # 两段画布的内容区宽度完全一致，遮挡框才能像素级对齐）。
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
 
         self.canvas.bind("<Configure>", lambda e: self._redraw())
-        # hover 用来让鼠标经过时 current 标签生效，_on_press 才能识别出
-        # 点在哪个删除按钮上（Canvas 的 current 标签依赖鼠标悬停）。
-        self.canvas.bind("<Motion>", self._on_motion)
-        self.canvas.bind("<Leave>", lambda e: self.canvas.delete("hover"))
         self.canvas.bind("<Button-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         self.canvas.bind("<Button-3>", self._on_right_click)
+
+    # ---------- 外部状态（都是全局共享的）----------
+    @property
+    def regions(self) -> list[MaskRegion]:
+        """全局共享的遮挡框列表（所有画布共用一套）。"""
+        return self.app.regions
+
+    @regions.setter
+    def regions(self, value: list[MaskRegion]) -> None:
+        self.app.regions = list(value)
+
+    @property
+    def canon_w(self) -> int:
+        return self.app.canon_w
+
+    @property
+    def canon_h(self) -> int:
+        return self.app.canon_h
 
     # ---------- 图像装载 ----------
     def load_image(self, path: Path) -> None:
@@ -114,16 +117,19 @@ class MaskCanvas(tk.Frame):
         self.canvas.config(cursor="crosshair")
         self._redraw()
 
+    def set_thumbnail(self, path: Path) -> None:
+        """显示首帧静帧（非激活段用它占位）。"""
+        self.load_image(path)
+
     def clear_image(self) -> None:
         self.image = None
         self.img_w = self.img_h = 0
-        self.regions = []
         # 没图时给出明确可点的光标，而不是让用户以为坏了
         self.canvas.config(cursor="hand2")
         self._redraw()
 
     def set_frame_image(self, img, w: int, h: int) -> None:
-        """显示一帧（播放用）。坐标基准不变，仍是原视频分辨率。"""
+        """显示一帧（播放用）。坐标基准不变，仍是全局遮挡坐标。"""
         self.image = img
         self.img_w, self.img_h = w, h
         self.canvas.config(cursor="crosshair")
@@ -133,15 +139,39 @@ class MaskCanvas(tk.Frame):
         self.video_w, self.video_h = w, h
         self._redraw()
 
+    def set_active(self, active: bool) -> None:
+        """标记是否为当前激活段（激活段的边框高亮，且只有它会被播放）。"""
+        if self._is_active == active:
+            return
+        self._is_active = active
+        self._apply_edge()
+        self._redraw()
+
     def set_drop_highlight(self, on: bool) -> None:
         """拖拽悬停时高亮边框，给出"松手就能放进来"的视觉反馈。"""
         if self._drop_hint == on:
             return
         self._drop_hint = on
-        self.configure(highlightbackground=ACCENT if on else BORDER,
-                       highlightthickness=2 if on else 1)
+        self._apply_edge()
         self._redraw()
 
+    def _apply_edge(self) -> None:
+        """更新外框线。
+
+        注意：highlightthickness 必须**恒定**。它是画在控件内侧的，
+        厚度一变就吃掉内层画布的像素（实测 1px vs 2px 会让内层画布差 2px），
+        而遮挡框是按像素定位的，同一套框在两段画布上就会错位。
+        激活/拖入态的区分改用「颜色 + 画布内侧描边」表达。
+        """
+        if self._drop_hint:
+            edge = DROP_EDGE
+        elif self._is_active:
+            edge = ACCENT
+        else:
+            edge = EDGE
+        self.configure(highlightbackground=edge, highlightthickness=1)
+
+    # ---------- 坐标换算 ----------
     def _fit(self) -> None:
         """计算缩放比例与居中偏移。"""
         cw = max(1, self.canvas.winfo_width())
@@ -156,202 +186,39 @@ class MaskCanvas(tk.Frame):
     def _to_display(self, x: float, y: float) -> tuple[float, float]:
         return self.offset_x + x * self.scale, self.offset_y + y * self.scale
 
-    def _to_video(self, dx: float, dy: float) -> tuple[int, int]:
-        """显示坐标 -> 视频真实像素坐标。
+    def _to_canon(self, dx: float, dy: float) -> tuple[int, int]:
+        """显示坐标 -> 全局遮挡坐标。
 
-        画布上的图可能是代理分辨率（640x360），而遮挡必须记在原视频分辨率
-        （1920x1080），所以这里要乘上比例。
+        显示的是代理图（640x360），而全局坐标记在基准分辨率上，
+        所以这里要把「代理图 -> 视频 -> 基准」两级比例都乘上。
         """
         ix = (dx - self.offset_x) / self.scale
         iy = (dy - self.offset_y) / self.scale
         if self.video_w and self.img_w:
             ix *= self.video_w / self.img_w
             iy *= self.video_h / self.img_h
+        if self.canon_w and self.video_w:
+            ix *= self.canon_w / self.video_w
+            iy *= self.canon_h / self.video_h
         return max(0, int(ix)), max(0, int(iy))
 
-    def _video_to_display_len(self, vx: float, vy: float) -> tuple[float, float]:
-        """视频坐标长度 -> 显示长度。"""
-        if self.video_w and self.img_w:
-            return vx * (self.img_w / self.video_w), vy * (self.img_h / self.video_h)
-        return vx, vy
+    def _canon_len_to_display(self, cx: float, cy: float) -> tuple[float, float]:
+        """全局坐标长度 -> 显示长度（返回的是「代理图像素」尺度）。
 
-    # ---------- 槽位卡 ----------
-    def _layout_slots(self) -> None:
-        """把整块深色区域平分成 N 块，每块就是一个待合并槽位。
-
-        关键点：**不留间隙**。之前把槽位做成「深色区域里摆小卡片」，
-        中间的黑底和卡片看着像两个区域；现在让槽位直接铺满整个画布，
-        视觉上就是一整块，按数量等分而已。
-
-        排列规则：
-          - 1 个：整块（就是一整个拖放区）
-          - 2 个：左右各一半（横屏视频更常用上下，改为上下对半）
-          - 3~4 个：2x2 网格
+        canon --×(video/canon)--> video --×(img/video)--> img
+        两级比例相乘等于 img/canon，所以这里不需要知道视频分辨率。
         """
-        cw = max(1, self.canvas.winfo_width())
-        ch = max(1, self.canvas.winfo_height())
-        n = len(self.slots)
-        if not n:
-            return
-
-        if n == 1:
-            s = self.slots[0]
-            s.x, s.y, s.w, s.h = 0.0, 0.0, cw, ch
-            return
-        if n == 2:
-            # 对半切，中间一条细分隔线
-            half = cw / 2
-            for i, s in enumerate(self.slots):
-                s.x = i * half
-                s.y = 0.0
-                s.w = half
-                s.h = ch
-            return
-
-        # 3~4 个：2x2 网格，格间只留一条细缝
-        cols, rows = 2, 2
-        gap = 2.0
-        cw_each = (cw - gap) / cols
-        ch_each = (ch - gap) / rows
-        for i, s in enumerate(self.slots):
-            r, c = divmod(i, cols)
-            s.x = c * (cw_each + gap)
-            s.y = r * (ch_each + gap)
-            s.w = cw_each
-            s.h = ch_each
-
-    def _slot_corners(self) -> list[tuple[float, float]]:
-        """每个槽位用于放标题/文件的中心点。
-
-        有预览图时缩到画面底部的窄条里，避免遮住正在看的画面；
-        没有画面时就是整块的中心。
-        """
-        cw = max(1, self.canvas.winfo_width())
-        ch = max(1, self.canvas.winfo_height())
-        if not self.image:
-            return [(s.x + s.w / 2, s.y + s.h / 2) for s in self.slots]
-        band_h = min(ch * 0.22, 96.0)
-        band_top = ch - band_h
-        return [(s.x + s.w / 2, band_top + band_h / 2) for s in self.slots]
-
-    def slot_at(self, x: float, y: float) -> SlotCard | None:
-        """命中测试：坐标落在哪张槽位卡上。"""
-        for s in reversed(self.slots):
-            if s.x <= x <= s.x + s.w and s.y <= y <= s.y + s.h:
-                return s
-        return None
-
-    def add_slot(self, file: Path | None = None) -> SlotCard:
-        """新增一个槽位并返回。"""
-        s = SlotCard(index=len(self.slots), file=file)
-        self.slots.append(s)
-        self._redraw()
-        return s
-
-    def remove_slot(self, slot: SlotCard) -> None:
-        if slot in self.slots:
-            self.slots.remove(slot)
-        for i, s in enumerate(self.slots):
-            s.index = i
-        self._redraw()
-
-    def clear_slots(self) -> None:
-        self.slots.clear()
-        self._redraw()
-
-    def fill_slot(self, slot: SlotCard, file: Path) -> None:
-        """把文件放进指定槽位（若已满则返回 False）。"""
-        slot.file = file
-        self._redraw()
-
-    def _draw_slots(self) -> None:
-        """画所有槽位。
-
-        有预览图时只画画面底部的窄条（不遮挡正在看的视频）；
-        没有画面时槽位铺满整个画布。
-        """
-        if not self.slots:
-            return
-        ch = max(1, self.canvas.winfo_height())
-        band_h = min(ch * 0.22, 96.0)
-        for s, (cx, cy) in zip(self.slots, self._slot_corners()):
-            if s.filled:
-                bg = SLOT_FILLED if not self.image else "#204030"
-                edge = SLOT_FILLED_EDGE
-            else:
-                # 空槽与画布同色，只画一条极淡的分隔线。
-                # 不填不同底色 —— 否则整块深色区被切成「若干小卡片」，
-                # 视觉上又变成两个区域了。
-                bg = "" if not self.image else "#22262b"
-                edge = SLOT_EDGE
-            if self.image:
-                band_h = min(ch * 0.22, 96.0)
-                self.canvas.create_rectangle(
-                    s.x + 2, ch - band_h, s.x + s.w - 2, ch - 2,
-                    fill=bg, outline=edge, width=1, tags="slot")
-                band_top = ch - band_h
-            else:
-                # 空槽与画布同色（不填底色，否则又变成「卡片」了），
-                # 但画一圈内缩的虚线框 —— 这样即便只有一个槽位，
-                # 也能看出「这块是被框出来的独立区域」，
-                # 和「什么都没开」的整块拖放区区分开。
-                self.canvas.create_rectangle(
-                    s.x + 10, s.y + 10, s.x + s.w - 10, s.y + s.h - 10,
-                    fill="", outline=SLOT_EDGE, width=1,
-                    dash=(7, 5), tags="slot")
-                band_top = s.y
-            self.canvas.create_text(
-                cx, cy - 16, text=f"第 {s.index + 1} 段",
-                fill=SLOT_TEXT, font=("Microsoft YaHei UI", 11, "bold"))
-            if s.filled:
-                name = s.file.name if s.file else ""
-                # 文件名可能很长，两端省略避免溢出
-                shown = name if len(name) <= 22 else name[:10] + "…" + name[-10:]
-                self.canvas.create_text(
-                    cx, cy + 10, text=shown, fill="#a8e6c4",
-                    font=("Microsoft YaHei UI", 10))
-                # 删除按钮：只靠右键移除太隐蔽，拖错了很难发现能删
-                bx = s.x + s.w - 22
-                by = band_top + 22
-                br = 13
-                self.canvas.create_oval(
-                    bx - br, by - br, bx + br, by + br,
-                    fill="#c0392b", outline="#e74c3c", width=1,
-                    tags=("slot_del", f"slot_{s.index}"))
-                self.canvas.create_text(
-                    bx, by, text="✕", fill="#ffffff",
-                    font=("Segoe UI", 10, "bold"),
-                    tags=("slot_del", f"slot_{s.index}"))
-                self.canvas.create_text(
-                    cx, cy + 34, text="拖到别处可换 · 点 ✕ 移除",
-                    fill=SLOT_SUB, font=("Microsoft YaHei UI", 9))
-            else:
-                self.canvas.create_text(
-                    cx, cy + 10, text="把视频拖到这里",
-                    fill=SLOT_SUB, font=("Microsoft YaHei UI", 10))
+        if not self.img_w or not self.canon_w:
+            return cx, cy
+        return cx * self.img_w / self.canon_w, cy * self.img_h / self.canon_h
 
     # ---------- 绘制 ----------
     def _redraw(self) -> None:
         self.canvas.delete("all")
         self._fit()
-        if not self.image and not self.slots:
-            # 一个槽位都没有：整块区域就是一个大拖放区。
-            # 这里必须明确提示「点按钮会多出一块」—— 否则用户点完
-            # 「添加视频」发现只是多了个标题，看不出变化，
-            # 会以为按钮没用。视觉上要和「已开槽位」明显不同。
-            cx = self.canvas.winfo_width() / 2
-            cy = self.canvas.winfo_height() / 2
-            self.canvas.create_text(
-                cx, cy - 20, text="把视频拖到这里",
-                fill="#9aa5b4", font=("Microsoft YaHei UI", 12))
-            self.canvas.create_text(
-                cx, cy + 14, text="或点左上角「添加视频」，把画面分成多段",
-                fill="#6b7684", font=("Microsoft YaHei UI", 9))
-            return
         if not self.image:
-            # 还没有预览帧，但已经有槽位了 —— 只画槽位即可
-            self._layout_slots()
-            self._draw_slots()
+            self._draw_empty_state()
+            self._draw_state_border()
             return
 
         x0, y0 = self._to_display(0, 0)
@@ -360,126 +227,132 @@ class MaskCanvas(tk.Frame):
                                  anchor="nw", tags="frame")
 
         for r in self.regions:
-            self._draw_region(r, label=r.label)
+            self._draw_region(r)
 
         # 正在拖拽的临时框
         if self._drag_from and self._drag_now:
             ax, ay = self._drag_from
             bx, by = self._drag_now
-            rx0, ry0 = self._to_display(min(ax, bx), min(ay, by))
-            rx1, ry1 = self._to_display(max(ax, bx), max(ay, by))
+            rx0, ry0 = self._canon_to_display(min(ax, ay), min(ay, by))
+            rx1, ry1 = self._canon_to_display(max(ax, bx), max(ay, by))
             self.canvas.create_rectangle(
                 rx0, ry0, rx1, ry1, outline="#ffd166", width=2, dash=(4, 3))
 
         # 选中框高亮描边
         if self._active_idx is not None and self._active_idx < len(self.regions):
-            r = self.regions[self._active_idx]
-            dx, dy = self._video_to_display_len(r.x, r.y)
-            dw, dh = self._video_to_display_len(r.w, r.h)
-            ax, ay = self._to_display(dx, dy)
-            bx, by = self._to_display(dx + dw, dy + dh)
-            self.canvas.create_rectangle(ax - 2, ay - 2, bx + 2, by + 2,
-                                         outline="#ffd166", width=2)
+            self._draw_region(self.regions[self._active_idx], selected=True)
 
-        # 槽位卡画在最上层，否则会被画面或遮挡框盖住
-        self._layout_slots()
-        self._draw_slots()
+        self._draw_state_border()
 
-    def _draw_region(self, r: MaskRegion, label: str) -> None:
-        # r 的坐标是视频真实像素，画在代理图上要按比例缩放
-        dx, dy = self._video_to_display_len(r.x, r.y)
-        dw, dh = self._video_to_display_len(r.w, r.h)
+    def _draw_state_border(self) -> None:
+        """画布内侧的状态描边。
+
+        外框线的粗细必须恒定（见 _apply_edge 的说明），
+        所以「哪块是激活的」用内侧描边表达：
+        激活 = 蓝色实线，拖入悬停 = 琥珀色虚线。
+        """
+        if not (self._is_active or self._drop_hint):
+            return
+        w = max(1, self.canvas.winfo_width())
+        h = max(1, self.canvas.winfo_height())
+        if self._drop_hint:
+            self.canvas.create_rectangle(1, 1, w - 2, h - 2,
+                                         outline=DROP_EDGE, width=2,
+                                         dash=(6, 3))
+        else:
+            self.canvas.create_rectangle(1, 1, w - 2, h - 2,
+                                         outline=ACCENT, width=2)
+
+    def _canon_to_display(self, cx: float, cy: float) -> tuple[float, float]:
+        dx, dy = self._canon_len_to_display(cx, cy)
+        return self._to_display(dx, dy)
+
+    def _draw_empty_state(self) -> None:
+        """空画布：明确告诉用户「把视频拖到这里」。"""
+        cx = self.canvas.winfo_width() / 2
+        cy = self.canvas.winfo_height() / 2
+        self.canvas.create_text(
+            cx, cy - 20, text="把视频拖到这里",
+            fill="#9aa5b4", font=("Microsoft YaHei UI", 12))
+        if len(getattr(self.app, "segments", [])) <= 1:
+            self.canvas.create_text(
+                cx, cy + 14, text="或点左上角「添加视频」，再开一个画布",
+                fill="#6b7684", font=("Microsoft YaHei UI", 9))
+
+    def _draw_region(self, r: MaskRegion, selected: bool = False) -> None:
+        # r 是全局坐标，画在代理图上要按比例缩放
+        dx, dy = self._canon_len_to_display(r.x, r.y)
+        dw, dh = self._canon_len_to_display(r.w, r.h)
         ax, ay = self._to_display(dx, dy)
         bx, by = self._to_display(dx + dw, dy + dh)
         # 半透明黑 + 描边，直观表示「这里会被纯色盖住」
         self.canvas.create_rectangle(ax, ay, bx, by, fill="#000000",
                                      stipple="gray50", outline="#ffd166", width=1)
+        if selected:
+            self.canvas.create_rectangle(ax - 2, ay - 2, bx + 2, by + 2,
+                                         outline="#ffd166", width=2)
         if bx - ax > 40:
-            self.canvas.create_text(ax + 5, ay - 8, text=label, anchor="w",
+            self.canvas.create_text(ax + 5, ay - 8, text=r.label, anchor="w",
                                     fill="#ffd166", font=("Microsoft YaHei UI", 8, "bold"))
 
     # ---------- 鼠标交互 ----------
-    def _on_motion(self, _event=None) -> None:
-        """鼠标移动时给删除按钮加高亮（顺带让 current 标签生效）。"""
-        self.canvas.delete("hover")
-        for item in self.canvas.find_overlapping(
-                self.canvas.winfo_pointerx() - self.canvas.winfo_rootx(),
-                self.canvas.winfo_pointery() - self.canvas.winfo_rooty(),
-                self.canvas.winfo_pointerx() - self.canvas.winfo_rootx(),
-                self.canvas.winfo_pointery() - self.canvas.winfo_rooty()):
-            for tag in self.canvas.gettags(item):
-                if tag.startswith("slot_"):
-                    self.canvas.addtag_withtag("hover", item)
-
-    def _remove_slot_by_index(self, idx: int) -> None:
-        """按序号移除槽位并通知 app 同步列表。"""
-        if not (0 <= idx < len(self.slots)):
-            return
-        slot = self.slots[idx]
-        self.remove_slot(slot)
-        if hasattr(self.app, "on_slot_removed"):
-            self.app.on_slot_removed(slot)
-
     def _on_press(self, event) -> None:
-        # 先判槽位卡的删除按钮。必须在「没有预览图」的早退之前处理 ——
-        # 否则空状态点✕ 毫无反应。
-        hit = self.canvas.find_withtag("current")
-        if hit:
-            for item in hit:
-                for tag in self.canvas.gettags(item):
-                    if tag.startswith("slot_"):
-                        idx = int(tag.split("_", 1)[1])
-                        self._remove_slot_by_index(idx)
-                        return "break"
+        # 点击画布 = 切到这一段（只有激活段会被播放）
+        if hasattr(self.app, "set_active_segment"):
+            self.app.set_active_segment(self.index)
 
         if not self.image:
             return
         # 点在已有框上则选中，否则开始新框
         for i, r in enumerate(self.regions):
-            dx, dy = self._video_to_display_len(r.x, r.y)
-            dw, dh = self._video_to_display_len(r.w, r.h)
-            ax, ay = self._to_display(dx, dy)
-            bx, by = self._to_display(dx + dw, dy + dh)
+            ax, ay, bx, by = self._region_display_rect(r)
             if ax <= event.x <= bx and ay <= event.y <= by:
                 self._active_idx = i
-                self._drag_from = self._to_video(event.x, event.y)
+                self._drag_from = self._to_canon(event.x, event.y)
                 self._drag_now = self._drag_from
                 self._redraw()
                 return
         self._active_idx = None
-        self._drag_from = self._to_video(event.x, event.y)
+        self._drag_from = self._to_canon(event.x, event.y)
         self._drag_now = self._drag_from
         self._redraw()
+
+    def _region_display_rect(self, r: MaskRegion) -> tuple[float, float, float, float]:
+        dx, dy = self._canon_len_to_display(r.x, r.y)
+        dw, dh = self._canon_len_to_display(r.w, r.h)
+        ax, ay = self._to_display(dx, dy)
+        bx, by = self._to_display(dx + dw, dy + dh)
+        return ax, ay, bx, by
 
     def _on_drag(self, event) -> None:
         if self._drag_from is None:
             return
-        self._drag_now = self._to_video(event.x, event.y)
+        self._drag_now = self._to_canon(event.x, event.y)
         self._redraw()
 
     def _on_release(self, event) -> None:
         if self._drag_from is None:
             return
         start = self._drag_from
-        end = self._to_video(event.x, event.y)
+        end = self._to_canon(event.x, event.y)
         self._drag_from = self._drag_now = None
 
         x0, x1 = sorted((start[0], end[0]))
         y0, y1 = sorted((start[1], end[1]))
-        # 夹到视频真实范围内，避免因代理/原图分辨率差异产生越界坐标
-        if self.video_w:
-            x0, x1 = max(0, min(x0, self.video_w - 1)), max(0, min(x1, self.video_w))
-            y0, y1 = max(0, min(y0, self.video_h - 1)), max(0, min(y1, self.video_h))
+        # 夹到基准分辨率范围内，避免因代理/原图分辨率差异产生越界坐标
+        if self.canon_w:
+            x0, x1 = max(0, min(x0, self.canon_w - 1)), max(0, min(x1, self.canon_w))
+            y0, y1 = max(0, min(y0, self.canon_h - 1)), max(0, min(y1, self.canon_h))
         # 小于 4 像素视为误触，忽略
         if x1 - x0 < 4 or y1 - y0 < 4:
             self._redraw()
             return
 
-        # 已选中已有框 -> 视为移动/缩放该框
+        # 已选中已有框 -> 视为移动该框
         if self._active_idx is not None and self._active_idx < len(self.regions):
             r = self.regions[self._active_idx]
-            lim_w = self.video_w or self.img_w
-            lim_h = self.video_h or self.img_h
+            lim_w = self.canon_w or self.video_w
+            lim_h = self.canon_h or self.video_h
             nx = max(0, min(r.x + (x0 - start[0]), lim_w - r.w))
             ny = max(0, min(r.y + (y0 - start[1]), lim_h - r.h))
             r.x, r.y = nx, ny
@@ -493,24 +366,65 @@ class MaskCanvas(tk.Frame):
         self.app.on_regions_changed()
 
     def _on_right_click(self, event) -> None:
-        """右键：优先删槽位卡，其次删遮挡框。
-
-        槽位画在上层，所以要先判槽位 —— 否则点卡片会误删下面的遮挡框。
-        """
-        slot = self.slot_at(event.x, event.y)
-        if slot is not None:
-            self.remove_slot(slot)
-            if hasattr(self.app, "on_slot_removed"):
-                self.app.on_slot_removed(slot)
-            return
-
+        """右键：删除点到的遮挡框。"""
         for i, r in enumerate(self.regions):
-            dx, dy = self._video_to_display_len(r.x, r.y)
-            dw, dh = self._video_to_display_len(r.w, r.h)
-            ax, ay = self._to_display(dx, dy)
-            bx, by = self._to_display(dx + dw, dy + dh)
+            ax, ay, bx, by = self._region_display_rect(r)
             if ax <= event.x <= bx and ay <= event.y <= by:
                 self.regions.pop(i)
                 self._redraw()
                 self.app.on_regions_changed()
                 return
+
+
+class SegmentCard(tk.Frame):
+    """一个分段卡片 = 标题条 + 一块独立画布。
+
+    标题条显示「第 N 段」与文件名，并带一个 ✕ 移除按钮。
+    画布本身（MaskCanvas）不认识分段的概念，它只管画面与拖框。
+    """
+
+    def __init__(self, master, app, index: int):
+        super().__init__(master, bg=CARD, highlightbackground=BORDER,
+                         highlightthickness=1)
+        self.app = app
+        self.index = index
+        self.columnconfigure(0, weight=1)
+
+        # --- 标题条 ---
+        head = tk.Frame(self, bg=CARD)
+        head.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        head.columnconfigure(1, weight=1)
+
+        self.lbl_index = tk.Label(
+            head, text=f"第 {index + 1} 段", bg=CARD, fg=ACCENT,
+            font=("Microsoft YaHei UI", 9, "bold"))
+        self.lbl_index.grid(row=0, column=0, sticky="w", padx=(0, 8))
+
+        self.lbl_name = tk.Label(
+            head, text="（空 — 把视频拖进来）", bg=CARD, fg="#8b95a3",
+            font=("Microsoft YaHei UI", 9), anchor="w")
+        self.lbl_name.grid(row=0, column=1, sticky="ew")
+
+        self.btn_remove = tk.Label(
+            head, text="✕", bg=CARD, fg="#8b95a3",
+            font=("Segoe UI", 10, "bold"), cursor="hand2")
+        self.btn_remove.grid(row=0, column=2, sticky="e", padx=(8, 0))
+        self.btn_remove.bind("<Button-1>", lambda e: self.app.remove_segment(self.index))
+        self.btn_remove.bind("<Enter>", lambda e: self.btn_remove.config(fg="#c0392b"))
+        self.btn_remove.bind("<Leave>", lambda e: self.btn_remove.config(fg="#8b95a3"))
+
+        # --- 画面 ---
+        self.canvas = MaskCanvas(self, app, index)
+        self.canvas.grid(row=1, column=0, sticky="nsew")
+        self.rowconfigure(1, weight=1)
+
+    def set_file_name(self, name: str | None) -> None:
+        if name:
+            self.lbl_name.config(text=name, fg="#1f2933")
+        else:
+            self.lbl_name.config(text="（空 — 把视频拖进来）", fg="#8b95a3")
+
+    def set_index(self, index: int) -> None:
+        self.index = index
+        self.lbl_index.config(text=f"第 {index + 1} 段")
+        self.canvas.index = index
