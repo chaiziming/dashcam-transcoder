@@ -291,9 +291,14 @@ class MaskCanvas(tk.Frame):
                     fill=bg, outline=edge, width=1, tags="slot")
                 band_top = ch - band_h
             else:
+                # 空槽与画布同色（不填底色，否则又变成「卡片」了），
+                # 但画一圈内缩的虚线框 —— 这样即便只有一个槽位，
+                # 也能看出「这块是被框出来的独立区域」，
+                # 和「什么都没开」的整块拖放区区分开。
                 self.canvas.create_rectangle(
-                    s.x, s.y, s.x + s.w, s.y + s.h,
-                    fill=bg, outline=edge, width=1, tags="slot")
+                    s.x + 10, s.y + 10, s.x + s.w - 10, s.y + s.h - 10,
+                    fill="", outline=SLOT_EDGE, width=1,
+                    dash=(7, 5), tags="slot")
                 band_top = s.y
             self.canvas.create_text(
                 cx, cy - 16, text=f"第 {s.index + 1} 段",
@@ -330,12 +335,18 @@ class MaskCanvas(tk.Frame):
         self.canvas.delete("all")
         self._fit()
         if not self.image and not self.slots:
-            # 还没有槽位：整块区域就是拖放区，直接提示。
-            # 一旦点了「添加视频」，槽位会接管这块区域，文案由_draw_slots 画。
+            # 一个槽位都没有：整块区域就是一个大拖放区。
+            # 这里必须明确提示「点按钮会多出一块」—— 否则用户点完
+            # 「添加视频」发现只是多了个标题，看不出变化，
+            # 会以为按钮没用。视觉上要和「已开槽位」明显不同。
+            cx = self.canvas.winfo_width() / 2
+            cy = self.canvas.winfo_height() / 2
             self.canvas.create_text(
-                self.canvas.winfo_width() / 2, self.canvas.winfo_height() / 2,
-                text="把视频拖到这里",
-                fill="#9aa5b4", font=("Microsoft YaHei UI", 12), justify="center")
+                cx, cy - 20, text="把视频拖到这里",
+                fill="#9aa5b4", font=("Microsoft YaHei UI", 12))
+            self.canvas.create_text(
+                cx, cy + 14, text="或点左上角「添加视频」，把画面分成多段",
+                fill="#6b7684", font=("Microsoft YaHei UI", 9))
             return
         if not self.image:
             # 还没有预览帧，但已经有槽位了 —— 只画槽位即可
