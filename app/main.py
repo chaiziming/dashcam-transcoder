@@ -31,7 +31,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import config, ffmpeg_env, packager
-from app.canvas import SegmentCard
+from app.canvas import CANVAS_HEIGHT, SEG_GAP, SegmentCard
 from app.mask import EFFECT_LABELS, MaskPlan, MaskRegion, scale_box, scale_regions
 from app.merge_list import MergeListMixin
 from app.player import (FrameReader, ProxySpec, ensure_proxy, extract_thumbnail,
@@ -262,34 +262,70 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         return "break"
 
     def _seg_needed_height(self) -> int:
-        """所有画布卡片加起来需要多高（自然高度之和）。"""
+        """所有画布卡片加起来需要多高（各自最小高度之和）。"""
         total = 0
         for c in self.cards:
             try:
-                total += c.winfo_reqheight()
+                total += c.min_height()
             except tk.TclError:
                 pass
         return total
 
-    def _layout_segments(self) -> None:
-        """重算左区滚动区尺寸。
+    def _sync_seg_rows(self) -> None:
+        """把 seg_inner 的行配置同步成「每段均分富余空间」。
 
-        高度取 max(需要的高度, 视口高度)：
-        - 需要的高度 > 视口：内容超出一屏，按需要的高度建滚动区
-        - 需要的高度 <= 视口：内嵌窗口撑满视口，滚动条隐藏
+        weight=1 让各行平分内嵌窗口多出来的高度（1 段时就是全部占满），
+        minsize 保证视口再矮也不会把画面压到看不清。
+        这一步必须在段数变化时显式重设：grid 只在行数或 minsize 变化时
+        才重算权重分配，否则旧的分配会被一直沿用。
+        """
+        n = len(self.cards)
+        for i, c in enumerate(self.cards):
+            c.grid_configure(row=i, column=0, sticky="nsew",
+                             pady=(0, SEG_GAP))
+            self.seg_inner.rowconfigure(i, weight=1,
+                                        minsize=c.min_height())
+        # 清掉可能残留的旧行配置
+        for r in range(n, n + 2):
+            self.seg_inner.rowconfigure(r, weight=0, minsize=0)
+
+    def _layout_segments(self) -> None:
+        """按段数分配画布高度，并决定要不要滚动。
+
+        规则（用户明确要求）：
+        - 1 个视频：画布铺满整个左区（和以前单画布时一样）
+        - 2 个视频：各占一半，两块都完整可见，不该出现「看不全」
+        - 视口太矮：每段退回最小高度，超出才滚动
+
+        实现要点：**不能靠给卡片 config(height=...) 来分配**。
+        grid 会缓存 row 尺寸，卡片改高度不会触发重排（实测第 1 段
+        死活不肯从 512 变回 252）。这里只设内嵌窗口的总高度，
+        由 seg_inner 的 rowconfigure(weight=1, minsize=...) 让
+        grid 自己把富余空间均分给各段 —— 段数变化时 grid 会自然重算。
         """
         try:
             self.update_idletasks()
         except tk.TclError:
             pass
+
+        n = len(self.cards)
         view_h = max(1, self.left_canvas.winfo_height())
         view_w = max(1, self.left_canvas.winfo_width())
-        need = self._seg_needed_height()
+
+        # 内嵌窗口的宽度跟随视口，高度取「视口」与「各段最小高度之和」的较大者：
+        # - 视口够高：内嵌窗口=视口，各段按 weight 均分（1 段占满 / 2 段对半）
+        # - 视口不够：内嵌窗口=最小高度之和，超出部分靠滚动条看
+        need = self._seg_needed_height() + SEG_GAP * max(0, n - 1)
         height = max(need, view_h)
+
         self.left_canvas.itemconfigure(self._seg_window, width=view_w,
                                        height=height)
         self.left_canvas.configure(scrollregion=(0, 0, view_w, height))
-        if need > view_h + 2:
+        self._sync_left_scrollbar(need > view_h + 2)
+
+    def _sync_left_scrollbar(self, need: bool) -> None:
+        """按需显示/隐藏左区滚动条。"""
+        if need:
             if not self._left_sb.winfo_ismapped():
                 self._left_sb.grid()
             self.left_canvas.configure(yscrollcommand=self._left_sb.set)
@@ -626,9 +662,10 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
         self.segments.append(seg)
 
         card = SegmentCard(self.seg_inner, self, index)
-        card.grid(row=index, column=0, sticky="ew", pady=(0, 8))
+        card.grid(row=index, column=0, sticky="nsew", pady=(0, SEG_GAP))
         self.cards.append(card)
         self._register_card_dnd(card, index)
+        self._sync_seg_rows()
 
         self._layout_segments()
         self.set_active_segment(index)
@@ -666,6 +703,7 @@ class MosaicApp(MergeListMixin, TkinterDnD.Tk if _HAS_DND else tk.Tk):
             self.active_index = min(self.active_index, len(self.segments) - 1)
 
         self._apply_active_state()
+        self._sync_seg_rows()
         self._layout_segments()
         self._refresh_file_list()
         self._refresh_preview_bar()

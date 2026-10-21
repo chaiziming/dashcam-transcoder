@@ -253,6 +253,77 @@ def build_ui() -> None:
     except Exception as e:  # noqa: BLE001
         check("拖放", False, f"{type(e).__name__}: {e}")
 
+    # ---- 画布高度按段数分配（回归项：曾写死 300px，1 段留白 / 2 段看不全）----
+    print("\n== 7. 画布高度分配 ==")
+    try:
+        app.geometry("1250x760")
+        app.update_idletasks()
+        app.update()
+
+        def card_h():
+            return [c.winfo_height() for c in app.cards]
+
+        view = app.left_canvas.winfo_height()
+        check("初始 1 个画布铺满左区",
+              len(app.cards) == 1 and card_h()[0] >= view - 40,
+              f"画布高={card_h()} 视口={view}")
+        check("铺满时不显示滚动条", not app._left_sb.winfo_ismapped())
+
+        app.on_add_video()
+        app.update_idletasks()
+        app.update()
+        hs = card_h()
+        check("2 个画布各占一半",
+              len(hs) == 2 and abs(hs[0] - hs[1]) <= 4 and hs[0] > 100,
+              f"画布高={hs}")
+        check("2 个画布都完整可见（不需滚动）",
+              not app._left_sb.winfo_ismapped(),
+              f"滚动条={app._left_sb.winfo_ismapped()}")
+        check("2 段总高不超过视口",
+              sum(hs) <= view + 8, f"总高={sum(hs)} 视口={view}")
+
+        # 拉高窗口应重新分配
+        app.geometry("1250x950")
+        app.update_idletasks()
+        app.update()
+        hs2 = card_h()
+        check("拉高窗口后每段变高",
+              len(hs2) == 2 and hs2[0] > hs[0], f"{hs} -> {hs2}")
+        check("拉高后仍均分", abs(hs2[0] - hs2[1]) <= 4, f"{hs2}")
+
+        # 视口不够时应出现滚动条。
+        # 注意：Windows 有最小窗口高度（约 700px），geometry() 压不下去，
+        # 所以这里临时把每段的「最小高度」抬到超过视口来模拟内容超高，
+        # 验证的是同一段判断逻辑（need > view_h 才弹滚动条）。
+        view_h = app.left_canvas.winfo_height()
+        saved = [c.min_height() for c in app.cards]
+        big = view_h + 40
+        for i, c in enumerate(app.cards):
+            app.seg_inner.rowconfigure(i, minsize=big)
+            c.min_height = lambda h=big: h      # noqa: B023 - 逐卡片固定捕获
+        app._layout_segments()
+        app.update_idletasks()
+        app.update()
+        check("视口不够时出现滚动条", app._left_sb.winfo_ismapped(),
+              f"need={app._seg_needed_height()} 视口={view_h}")
+        before = app.left_canvas.yview()
+        app.left_canvas.yview_moveto(1.0)
+        app.update()
+        after = app.left_canvas.yview()
+        check("滚动条可拖到底", after[1] > before[1] and after[0] > before[0],
+              f"{before} -> {after}")
+        app.left_canvas.yview_moveto(0.0)
+        # 恢复正常分配
+        for i, c in enumerate(app.cards):
+            del c.min_height
+            app.seg_inner.rowconfigure(i, minsize=saved[i])
+        app._layout_segments()
+        app.update_idletasks()
+        app.update()
+        check("恢复后滚动条消失", not app._left_sb.winfo_ismapped())
+    except Exception as e:  # noqa: BLE001
+        check("画布高度分配", False, f"{type(e).__name__}: {e}")
+
     try:
         app.destroy()
     except Exception:  # noqa: BLE001

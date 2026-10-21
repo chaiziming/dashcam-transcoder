@@ -38,10 +38,16 @@ DROP_EDGE = "#f0a020"
 SLOT_TEXT = "#c3cbd6"
 SLOT_SUB = "#8b95a3"
 
-# 每个画布的默认高度（像素）。两个画布纵向排列时需要滚动才能看全，
-# 但单个画布不能太矮 —— 16:9 的视频在 645px 宽的左栏里，若按宽度铺满
-# 需要约 363px 高。取 300 让视频基本铺满宽度，VIN 条才有足够高度可点。
-CANVAS_HEIGHT = 300
+# 画布的**最小**高度（像素）。实际高度由 main._layout_segments 按段数
+# 动态分配：1 段时铺满整个左区，2 段时各占一半，都不够时才用这个下限并滚动。
+#
+# 下限不能太低：16:9 的视频在 645px 宽的左栏里按宽铺满需要约 363px 高，
+# 低于 200px 时 VIN 条那一条就没法点中了。
+CANVAS_HEIGHT = 200
+
+# 画布之间的垂直间距（像素）。必须与 main.add_segment 里 grid 的 pady 一致，
+# 否则分配高度时会把间距算漏，导致内容总高略微超出视口而误弹滚动条。
+SEG_GAP = 8
 
 
 class MaskCanvas(tk.Frame):
@@ -416,7 +422,9 @@ class SegmentCard(tk.Frame):
         # --- 画面 ---
         self.canvas = MaskCanvas(self, app, index)
         self.canvas.grid(row=1, column=0, sticky="nsew")
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(1, weight=1, minsize=CANVAS_HEIGHT)
+        # 标题条固定高，画面吃掉剩余空间
+        self.rowconfigure(0, weight=0)
 
     def set_file_name(self, name: str | None) -> None:
         if name:
@@ -428,3 +436,15 @@ class SegmentCard(tk.Frame):
         self.index = index
         self.lbl_index.config(text=f"第 {index + 1} 段")
         self.canvas.index = index
+
+    # ---------- 高度分配 ----------
+    def head_height(self) -> int:
+        """标题条占的高度（含与画面之间的间距）。"""
+        try:
+            return self.lbl_index.winfo_reqheight() + 4
+        except tk.TclError:
+            return 22
+
+    def min_height(self) -> int:
+        """这张卡片的最小高度 = 标题条 + 画面下限。"""
+        return self.head_height() + CANVAS_HEIGHT
